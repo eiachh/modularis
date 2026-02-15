@@ -1,6 +1,12 @@
 package domain
 
+import "encoding/json"
+
 // Capability describes a single action an agent can perform.
+// Capabilities are registered either at connect time (via RegisterPayload)
+// or dynamically at runtime (via capability_register message). The latter
+// enables components to be loaded and advertise their functions without
+// restarting/reconnecting the agent.
 type Capability struct {
 	// Name is the unique identifier for this capability (e.g. "math.add", "gpio.write").
 	Name string `json:"name"`
@@ -8,21 +14,25 @@ type Capability struct {
 	// Description is a human-readable summary of what the capability does.
 	Description string `json:"description"`
 
-	// Parameters describes the expected input schema as a list of parameter definitions.
-	Parameters []ParameterDef `json:"parameters,omitempty"`
-}
-
-// ParameterDef describes a single input parameter for a capability.
-type ParameterDef struct {
-	// Name of the parameter.
-	Name string `json:"name"`
-
-	// Type is the JSON-schema-style type (string, number, boolean, object, array).
-	Type string `json:"type"`
-
-	// Required indicates whether this parameter must be provided.
-	Required bool `json:"required"`
-
-	// Description is a human-readable explanation of the parameter.
-	Description string `json:"description,omitempty"`
+	// InputSchema describes the expected input arguments using a JSON Schema
+	// document. This replaces the former Parameters[] list to provide a
+	// standard, expressive way to declare required arguments, types,
+	// validation rules, defaults, etc.
+	//
+	// Example:
+	//   {
+	//     "type": "object",
+	//     "properties": {
+	//       "message": {
+	//         "type": "string",
+	//         "description": "The message to echo back"
+	//       }
+	//     },
+	//     "required": ["message"]
+	//   }
+	//
+	// The schema is typically an object type whose properties define the
+	// capability's parameters. This aligns with the request for JSON-schema-
+	// based argument description in the /agent/capability/register flow.
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 }

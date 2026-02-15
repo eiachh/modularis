@@ -37,9 +37,23 @@ func main() {
 		Log:             log,
 	}
 
+	// CapabilitiesHandler exposes registered agent capabilities (agent_name,
+	// function_name, schema) for clients *and* handles /invoke (forwards to
+	// agent WS via hub). Reflects runtime registrations only.
+	capabilitiesHandler := &handler.CapabilitiesHandler{
+		Registry: agentRegistry,
+		// Hub for forwarding commands to agents (echo etc.).
+		Hub: agentHub,
+		Log: log,
+	}
+
 	router := gin.Default()
 	router.GET("/connect", connectHandler.Handle)
 	router.GET("/display", displayHandler.Handle)
+	// GET /capabilities: discovery.
+	// POST /invoke: assemble/forward command to agent (client → orch → agent).
+	router.GET("/capabilities", capabilitiesHandler.Handle)
+	router.POST("/invoke", capabilitiesHandler.HandleInvoke)
 
 	addr := envOr("LISTEN_ADDR", ":8080")
 	srv := &http.Server{

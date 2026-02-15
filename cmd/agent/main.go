@@ -40,20 +40,14 @@ func main() {
 	log.Info("connected, sending register message")
 
 	// --- Build and send register envelope ---------------------------------
-
-	capabilities := []domain.Capability{
-		{
-			Name:        "echo",
-			Description: "Echoes back the input (placeholder capability)",
-			Parameters: []domain.ParameterDef{
-				{Name: "message", Type: "string", Required: true, Description: "The message to echo back"},
-			},
-		},
-	}
+	//
+	// No capabilities in register payload (legacy support removed per
+	// requirements). Only agent name is sent. Capabilities are registered
+	// exclusively at runtime via capability_register message to support
+	// dynamic component loading.
 
 	regPayload, err := json.Marshal(domain.RegisterPayload{
-		Name:         *name,
-		Capabilities: capabilities,
+		Name: *name,
 	})
 	if err != nil {
 		log.Error("failed to marshal register payload", "error", err)
@@ -98,6 +92,45 @@ func main() {
 			Payload: dpPayload,
 		})
 
+		// --- Register the *only* capability: echo (runtime-only, no legacy) --
+		//
+		// After WS upgrade, dynamically register "echo" via capability_register.
+		// This is the sole command; it echoes input to display. In real agents,
+		// this would come from loaded components.
+		capReg := domain.CapabilityRegisterPayload{
+			AgentName:    *name,
+			FunctionName: "echo",
+			// JSON schema for required arg (message to echo).
+			Schema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"message": {
+						"type": "string",
+						"description": "Message to echo back to display"
+					}
+				},
+				"required": ["message"]
+			}`),
+		}
+		capRegPayload, marshalErr := json.Marshal(capReg)
+		if marshalErr != nil {
+			log.Error("failed to marshal capability_register payload", "error", marshalErr)
+		} else if err := conn.WriteJSON(domain.Envelope{
+			Type:    domain.MessageTypeCapabilityRegister,
+			Payload: capRegPayload,
+		}); err != nil {
+			log.Error("failed to send capability_register", "error", err)
+		} else {
+			log.Info("sent runtime capability registration",
+				"function_name", capReg.FunctionName,
+				"agent_name", capReg.AgentName,
+			)
+			// Orchestrator acks; logged in background read loop.
+		}
+
+		// Note: Command handling ("echo") is in the background read loop below
+		// (receives forwarded commands from orchestrator).
+
 	case domain.MessageTypeError:
 		var errPayload domain.ErrorPayload
 		if err := json.Unmarshal(resp.Payload, &errPayload); err != nil {
@@ -120,6 +153,8 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
 	// Read loop in background so we notice if the orchestrator drops us.
+	// Handles forwarded commands (e.g., "echo"): processes and sends to
+	// display (as specified; only echo supported).
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -129,7 +164,48 @@ func main() {
 				log.Info("connection closed", "error", err)
 				return
 			}
-			log.Debug("received message", "type", msg.Type)
+
+			// Handle commands forwarded from orchestrator/client.
+			switch msg.Type {
+			case domain.MessageTypeCommand:
+				var cmd domain.CommandPayload
+				if err := json.Unmarshal(msg.Payload, &cmd); err != nil {
+					log.Error("invalid command payload", "error", err)
+					continue
+				}
+				log.Info("received command", "function", cmd.FunctionName, "agent", cmd.AgentName)
+
+				// Only "echo" registered/supported: echo args to display.
+				// (No legacy/other funcs.)
+				if cmd.FunctionName == "echo" {
+					var args struct {
+						Message string `json:"message"`
+					}
+					if err := json.Unmarshal(cmd.Args, &args); err != nil {
+						log.Error("invalid echo args", "error", err)
+						continue
+					}
+					// Echo to display modules via existing payload.
+					dpPayload, _ := json.Marshal(domain.DisplayPayload{
+						Title: fmt.Sprintf("Echo from %s", cmd.AgentName),
+						Body:  fmt.Sprintf("Echo: %s", args.Message),
+						Level: "info",
+					})
+					if err := conn.WriteJSON(domain.Envelope{
+						Type:    domain.MessageTypeDisplay,
+						Payload: dpPayload,
+					}); err != nil {
+						log.Error("failed to broadcast echo to display", "error", err)
+					} else {
+						log.Info("echo sent to display", "message", args.Message)
+					}
+				} else {
+					log.Warn("unknown command", "function", cmd.FunctionName)
+				}
+
+			default:
+				log.Debug("received message", "type", msg.Type)
+			}
 		}
 	}()
 

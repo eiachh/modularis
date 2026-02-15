@@ -2,14 +2,16 @@ openapi: "3.1.0"
 
 info:
   title: Modularis Orchestrator API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     The Modularis Orchestrator is the central control plane of a distributed
-    automation platform. Agents connect over WebSocket, register their
-    capabilities, and wait for work. Display modules connect over a separate
-    WebSocket, register themselves, and receive broadcast events from agents.
-    Clients and adapters interact with the orchestrator via REST and event
-    streams.
+    automation platform built around the orchestrator. It consists of four
+    components: the orchestrator (singular central controller), agents
+    (execute work), displays (render output), and clients (issue requests).
+    Agents register their functionality dynamically so capabilities are
+    discovered at runtime. All components except the orchestrator can be
+    loaded dynamically at runtime, allowing capabilities to change without
+    restarts.
 
     ## Agent connection lifecycle
 
@@ -22,6 +24,12 @@ info:
        bidirectional messaging.
     5. The agent may send `display` messages at any time to broadcast
        output to all connected display modules.
+    6. After upgrade/registration the agent may send `capability_register`
+       messages at any time. This is the streamlined runtime registration
+       path (`/agent/capability/register` over WebSocket) for dynamic
+       components: the agent presents its name, function_name, and a
+       JSON Schema for required arguments. Capabilities can thus change
+       at runtime without reconnecting.
 
     ## Display connection lifecycle
 
@@ -48,6 +56,11 @@ paths:
         **must** send a `register` message as its first frame. The
         orchestrator will respond with `register_ack` on success or `error`
         on failure.
+
+        After successful registration the agent may send additional messages,
+        including `capability_register` (see MessageType for details). This
+        provides the runtime `/agent/capability/register` path supporting
+        dynamic component loading.
       tags:
         - agents
       responses:
@@ -75,6 +88,65 @@ paths:
         "400":
           description: Bad request – upgrade failed.
 
+  # /capabilities is the REST discovery endpoint for clients. Aggregates
+  # runtime-registered capabilities (agent_name, function_name, schema).
+  # No legacy initial-register support.
+  /capabilities:
+    get:
+      operationId: listCapabilities
+      summary: List all registered agent capabilities
+      description: |
+        Returns a flat list of capabilities in the exact format requested:
+        agent name, function name, and JSON schema for required arguments.
+        Capabilities are discovered dynamically at runtime via
+        `capability_register` (after agent WS upgrade on /connect). The list
+        updates live as agents load components.
+      tags:
+        - capabilities
+      responses:
+        "200":
+          description: OK – list of capabilities (may be empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CapabilitySummary"
+
+  # /invoke is the client REST endpoint to send commands. Validates/assembles
+  # package internally, forwards to agent via WS. Echo example broadcasts to
+  # display.
+  /invoke:
+    post:
+      operationId: invokeCapability
+      summary: Invoke an agent capability
+      description: |
+        Accepts a command (agent_name, function_name, args). Validates against
+        registered capabilities/schema, forwards to the agent's WebSocket
+        connection. For "echo", agent processes and sends result to displays.
+        Returns command result or error.
+      tags:
+        - capabilities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            # Reuses shared InvokeCommand (defined once in domain for client,
+            # orchestrator, etc.).
+            schema:
+              $ref: "#/components/schemas/InvokeCommand"
+      responses:
+        "200":
+          description: OK – command result (e.g., echoed output).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResultPayload"
+        "400":
+          description: Bad request – validation or routing error.
+        "404":
+          description: Agent/function not found.
+
 components:
   schemas:
     # -----------------------------------------------------------------
@@ -95,6 +167,14 @@ components:
           oneOf:
             - $ref: "#/components/schemas/RegisterPayload"
             - $ref: "#/components/schemas/RegisterAckPayload"
+            # capability_register/ack payloads for the runtime
+            # /agent/capability/register flow.
+            - $ref: "#/components/schemas/CapabilityRegisterPayload"
+            - $ref: "#/components/schemas/CapabilityRegisterAckPayload"
+            # command/command_result for client-invoke (/invoke) → orchestrator
+            # forward to agent WS.
+            - $ref: "#/components/schemas/CommandPayload"
+            - $ref: "#/components/schemas/CommandResultPayload"
             - $ref: "#/components/schemas/DisplayRegisterPayload"
             - $ref: "#/components/schemas/DisplayRegisterAckPayload"
             - $ref: "#/components/schemas/DisplayPayload"
@@ -108,6 +188,14 @@ components:
       enum:
         - register
         - register_ack
+        # capability_register is the runtime registration "path" (sent over
+        # WebSocket after /connect upgrade) for agents to dynamically
+        # announce capabilities whose JSON schema becomes known at runtime.
+        - capability_register
+        - capability_register_ack
+        # command/command_result for client → orchestrator → agent flow.
+        - command
+        - command_result
         - display_register
         - display_register_ack
         - display
@@ -121,17 +209,14 @@ components:
       type: object
       required:
         - name
-        - capabilities
       properties:
         name:
           type: string
-          description: Human-readable agent name chosen by the agent itself.
+          description: >
+            Human-readable agent name chosen by the agent itself. Capabilities
+            are now registered exclusively at runtime via `capability_register`
+            (no legacy support in initial register for dynamic loading).
           example: gpio-agent
-        capabilities:
-          type: array
-          items:
-            $ref: "#/components/schemas/Capability"
-          description: List of capabilities this agent provides.
 
     RegisterAckPayload:
       type: object
@@ -143,6 +228,56 @@ components:
           format: uuid
           description: Orchestrator-assigned unique identifier for the agent.
           example: a3f1c2e4-5678-4b9a-abcd-ef0123456789
+
+    # CapabilityRegisterPayload and CapabilityRegisterAckPayload support
+    # the runtime /agent/capability/register flow (MessageTypeCapabilityRegister).
+    # Sent over an already-established agent WebSocket after upgrade.
+    CapabilityRegisterPayload:
+      type: object
+      required:
+        - function_name
+        - schema
+      properties:
+        agent_name:
+          type: string
+          description: >
+            Human-readable agent name (should match the name used in the
+            initial `register` payload; provided for explicitness as
+            described in the registration requirement).
+          example: gpio-agent
+        function_name:
+          type: string
+          description: >
+            Unique identifier for the capability/function (becomes the
+            `Capability.name`). Namespaced strings are recommended.
+          example: runtime-example
+        schema:
+          type: object
+          description: >
+            JSON Schema document describing the required arguments/input for
+            this capability. Typically an `object` with `properties` and a
+            `required` array. This is the "json schema that is containing the
+            capabilities required argument" supplied by the agent.
+          additionalProperties: true
+          example:
+            type: object
+            properties:
+              input:
+                type: string
+                description: Input value for the runtime example capability
+            required: ["input"]
+
+    CapabilityRegisterAckPayload:
+      type: object
+      required:
+        - capability_name
+      properties:
+        capability_name:
+          type: string
+          description: >
+            Echoes the registered `function_name` so the agent can correlate
+            the acknowledgement with the request.
+          example: runtime-example
 
     # -----------------------------------------------------------------
     # Display payloads
@@ -228,6 +363,11 @@ components:
     # -----------------------------------------------------------------
     # Domain models
     # -----------------------------------------------------------------
+    # Capability now uses input_schema (full JSON Schema) for declaring
+    # required arguments. This change supports the runtime registration
+    # requirement where a JSON schema is supplied per function. The previous
+    # ParameterDef list was limited; JSON Schema is the standard for complex
+    # inputs and matches the requested capability registration payload.
     Capability:
       type: object
       required:
@@ -244,36 +384,127 @@ components:
           type: string
           description: Human-readable explanation of the capability.
           example: Adds two numbers together.
-        parameters:
-          type: array
-          items:
-            $ref: "#/components/schemas/ParameterDef"
-          description: Expected input parameters.
+        input_schema:
+          type: object
+          description: >
+            JSON Schema for the capability's input arguments (the "required
+            argument" schema). Agents supply this either in the initial
+            `register` payload or via `capability_register` messages.
+            Example shows schema for a function taking a single string param.
+          additionalProperties: true
+          example:
+            type: object
+            properties:
+              message:
+                type: string
+                description: The message to echo back
+            required: ["message"]
 
-    ParameterDef:
+    # ParameterDef has been removed in favor of input_schema (see above).
+
+    # CapabilitySummary for the REST /capabilities endpoint (client-facing).
+    CapabilitySummary:
       type: object
       required:
-        - name
-        - type
-        - required
+        - agent_name
+        - function_name
+        - schema
       properties:
-        name:
+        agent_name:
           type: string
-          description: Parameter name.
-          example: a
-        type:
+          description: Name of the agent providing this capability.
+          example: test-agent
+        function_name:
           type: string
           description: >
-            JSON-Schema-style type (string, number, boolean, object, array).
-          example: number
-        required:
-          type: boolean
-          description: Whether the parameter must be provided.
-          example: true
-        description:
+            The capability/function name (registered via function_name in
+            capability_register; runtime-only). Current example: "echo".
+          example: echo
+        schema:
+          type: object
+          description: >
+            The JSON Schema containing required arguments for the
+            capability (copied from registration).
+          additionalProperties: true
+          example:
+            type: object
+            properties:
+              message:
+                type: string
+                description: Message to echo back to display.
+            required: ["message"]
+
+    # CommandPayload/CommandResultPayload support the full invoke flow:
+    # client → /invoke → orchestrator forward (WS) → agent (echo) → display.
+    # InvokeCommand is the shared send package (defined once; used by client +
+    # orch to avoid dup structs like old invokeReq/CommandSendPackage).
+    CommandPayload:
+      type: object
+      required:
+        - agent_name
+        - function_name
+        - args
+      properties:
+        agent_id:
           type: string
-          description: Human-readable explanation of the parameter.
-          example: First operand.
+          format: uuid
+          description: Resolved internally by orchestrator for WS routing.
+        agent_name:
+          type: string
+          description: Agent to target.
+          example: test-agent
+        function_name:
+          type: string
+          description: Capability to invoke (must exist in registry).
+          example: echo
+        args:
+          type: object
+          description: Args validated against capability schema.
+          example:
+            message: hello
+
+    InvokeCommand:
+      type: object
+      required:
+        - agent_name
+        - function_name
+        - args
+      properties:
+        agent_name:
+          type: string
+          description: >
+            Targets the agent (resolved to internal ID by orchestrator for WS
+            forward; from capabilities list).
+          example: test-agent
+        function_name:
+          type: string
+          description: >
+            The capability/function (runtime-registered only; e.g., "echo").
+          example: echo
+        args:
+          type: object
+          description: >
+            Validated input args (schema-checked in AssembleAndValidateCommand;
+            matches capability schema, e.g., {"message": "..."} for echo).
+          additionalProperties: true
+          example:
+            message: hello from client
+
+    CommandResultPayload:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          example: true
+        result:
+          type: string
+          description: Output from command (e.g., echoed message).
+          example: hello
+        error:
+          type: string
+          description: Error details if failed.
 
     Agent:
       type: object
