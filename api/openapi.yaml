@@ -1,0 +1,330 @@
+openapi: "3.1.0"
+
+info:
+  title: Modularis Orchestrator API
+  version: 0.2.0
+  description: |
+    The Modularis Orchestrator is the central control plane of a distributed
+    automation platform. Agents connect over WebSocket, register their
+    capabilities, and wait for work. Display modules connect over a separate
+    WebSocket, register themselves, and receive broadcast events from agents.
+    Clients and adapters interact with the orchestrator via REST and event
+    streams.
+
+    ## Agent connection lifecycle
+
+    1. An agent opens a WebSocket to `GET /connect`.
+    2. The first message the agent sends **must** be a `register` envelope.
+    3. The orchestrator validates the payload and replies with either a
+       `register_ack` (success) or an `error` envelope (failure, followed
+       by connection close).
+    4. After successful registration the connection stays open for
+       bidirectional messaging.
+    5. The agent may send `display` messages at any time to broadcast
+       output to all connected display modules.
+
+    ## Display connection lifecycle
+
+    1. A display module opens a WebSocket to `GET /display`.
+    2. The first message the display sends **must** be a `display_register`
+       envelope.
+    3. The orchestrator validates the payload and replies with either a
+       `display_register_ack` (success) or an `error` envelope (failure,
+       followed by connection close).
+    4. After successful registration the connection stays open and the
+       display receives `display` messages broadcast by agents.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /connect:
+    get:
+      operationId: agentConnect
+      summary: Agent WebSocket connection endpoint
+      description: |
+        Upgrades the HTTP connection to a WebSocket. Once upgraded the agent
+        **must** send a `register` message as its first frame. The
+        orchestrator will respond with `register_ack` on success or `error`
+        on failure.
+      tags:
+        - agents
+      responses:
+        "101":
+          description: Switching Protocols – WebSocket upgrade accepted.
+        "400":
+          description: Bad request – upgrade failed.
+
+  /display:
+    get:
+      operationId: displayConnect
+      summary: Display module WebSocket connection endpoint
+      description: |
+        Upgrades the HTTP connection to a WebSocket. Once upgraded the
+        display module **must** send a `display_register` message as its
+        first frame. The orchestrator will respond with
+        `display_register_ack` on success or `error` on failure. After
+        registration the display receives `display` messages broadcast by
+        agents.
+      tags:
+        - displays
+      responses:
+        "101":
+          description: Switching Protocols – WebSocket upgrade accepted.
+        "400":
+          description: Bad request – upgrade failed.
+
+components:
+  schemas:
+    # -----------------------------------------------------------------
+    # Envelope
+    # -----------------------------------------------------------------
+    Envelope:
+      type: object
+      required:
+        - type
+        - payload
+      properties:
+        type:
+          $ref: "#/components/schemas/MessageType"
+        payload:
+          description: >
+            Type-specific JSON payload. Decode according to the `type`
+            discriminator.
+          oneOf:
+            - $ref: "#/components/schemas/RegisterPayload"
+            - $ref: "#/components/schemas/RegisterAckPayload"
+            - $ref: "#/components/schemas/DisplayRegisterPayload"
+            - $ref: "#/components/schemas/DisplayRegisterAckPayload"
+            - $ref: "#/components/schemas/DisplayPayload"
+            - $ref: "#/components/schemas/ErrorPayload"
+
+    # -----------------------------------------------------------------
+    # Message types
+    # -----------------------------------------------------------------
+    MessageType:
+      type: string
+      enum:
+        - register
+        - register_ack
+        - display_register
+        - display_register_ack
+        - display
+        - error
+      description: Discriminator for the envelope payload.
+
+    # -----------------------------------------------------------------
+    # Agent payloads
+    # -----------------------------------------------------------------
+    RegisterPayload:
+      type: object
+      required:
+        - name
+        - capabilities
+      properties:
+        name:
+          type: string
+          description: Human-readable agent name chosen by the agent itself.
+          example: gpio-agent
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capability"
+          description: List of capabilities this agent provides.
+
+    RegisterAckPayload:
+      type: object
+      required:
+        - agent_id
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+          description: Orchestrator-assigned unique identifier for the agent.
+          example: a3f1c2e4-5678-4b9a-abcd-ef0123456789
+
+    # -----------------------------------------------------------------
+    # Display payloads
+    # -----------------------------------------------------------------
+    DisplayRegisterPayload:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          description: Human-readable display name.
+          example: main-terminal
+        type:
+          type: string
+          description: >
+            Classification of the display module
+            (e.g. terminal, web, led, discord).
+          example: terminal
+
+    DisplayRegisterAckPayload:
+      type: object
+      required:
+        - display_id
+      properties:
+        display_id:
+          type: string
+          format: uuid
+          description: Orchestrator-assigned unique identifier for the display.
+          example: b4e2d3f5-6789-4c0b-bcde-f01234567890
+
+    DisplayPayload:
+      type: object
+      required:
+        - agent_id
+        - agent_name
+        - title
+        - body
+        - level
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+          description: ID of the agent that produced this output.
+          example: a3f1c2e4-5678-4b9a-abcd-ef0123456789
+        agent_name:
+          type: string
+          description: Human-readable name of the agent.
+          example: gpio-agent
+        title:
+          type: string
+          description: Short summary of the event (e.g. capability name).
+          example: math.add completed
+        body:
+          type: string
+          description: Main content to render.
+          example: "Result: 42"
+        level:
+          type: string
+          description: >
+            Severity or importance level (info, warn, error, success).
+          example: info
+
+    # -----------------------------------------------------------------
+    # Shared payloads
+    # -----------------------------------------------------------------
+    ErrorPayload:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code.
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          description: Human-readable error description.
+          example: agent name is required
+
+    # -----------------------------------------------------------------
+    # Domain models
+    # -----------------------------------------------------------------
+    Capability:
+      type: object
+      required:
+        - name
+        - description
+      properties:
+        name:
+          type: string
+          description: >
+            Unique identifier for the capability, typically namespaced
+            (e.g. `math.add`, `gpio.write`).
+          example: math.add
+        description:
+          type: string
+          description: Human-readable explanation of the capability.
+          example: Adds two numbers together.
+        parameters:
+          type: array
+          items:
+            $ref: "#/components/schemas/ParameterDef"
+          description: Expected input parameters.
+
+    ParameterDef:
+      type: object
+      required:
+        - name
+        - type
+        - required
+      properties:
+        name:
+          type: string
+          description: Parameter name.
+          example: a
+        type:
+          type: string
+          description: >
+            JSON-Schema-style type (string, number, boolean, object, array).
+          example: number
+        required:
+          type: boolean
+          description: Whether the parameter must be provided.
+          example: true
+        description:
+          type: string
+          description: Human-readable explanation of the parameter.
+          example: First operand.
+
+    Agent:
+      type: object
+      required:
+        - id
+        - name
+        - capabilities
+        - registered_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Orchestrator-assigned unique identifier.
+          example: a3f1c2e4-5678-4b9a-abcd-ef0123456789
+        name:
+          type: string
+          description: Human-readable agent name.
+          example: gpio-agent
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capability"
+        registered_at:
+          type: string
+          format: date-time
+          description: UTC timestamp of when the agent registered.
+          example: "2026-02-14T12:00:00Z"
+
+    Display:
+      type: object
+      required:
+        - id
+        - name
+        - type
+        - registered_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Orchestrator-assigned unique identifier.
+          example: b4e2d3f5-6789-4c0b-bcde-f01234567890
+        name:
+          type: string
+          description: Human-readable display name.
+          example: main-terminal
+        type:
+          type: string
+          description: Classification of the display module.
+          example: terminal
+        registered_at:
+          type: string
+          format: date-time
+          description: UTC timestamp of when the display registered.
+          example: "2026-02-14T12:00:00Z"
