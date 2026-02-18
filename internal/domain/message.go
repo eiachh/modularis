@@ -92,6 +92,7 @@ type RegisterAckPayload struct {
 //   - its name
 //   - the function (capability) name
 //   - the JSON schema containing the required arguments for that function.
+//
 // This format enables runtime registration of capabilities after the agent
 // has upgraded to WebSocket on /connect.
 type CapabilityRegisterPayload struct {
@@ -180,8 +181,6 @@ type CommandResultPayload struct {
 	// Error describes failure (if any).
 	Error string `json:"error,omitempty"`
 }
-
-
 
 // -----------------------------------------------------------------------
 // Display payloads

@@ -10,58 +10,55 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/modularis/modularis/internal/handler"
+	// New layered: application/agent service, transport/* , hub for WS (internal/ws removed; singular conn handler via hub).
+	agentapp "github.com/modularis/modularis/internal/application/agent"
+	"github.com/modularis/modularis/internal/hub"
 	"github.com/modularis/modularis/internal/registry"
-	"github.com/modularis/modularis/internal/ws"
+	httptransport "github.com/modularis/modularis/internal/transport/http" // alias to avoid std http conflict
+	websocket "github.com/modularis/modularis/internal/transport/websocket"
 )
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	// Setup registries/hubs (hub singular for all WS conns/clients/displays).
 	agentRegistry := registry.New()
-	agentHub := ws.NewHub(log, "agent")
+	agentHub := hub.NewHub(log, "agent")
+	displayHub := hub.NewHub(log, "display") // displayRegistry not needed; hub handles
 
-	displayRegistry := registry.NewDisplayRegistry()
-	displayHub := ws.NewHub(log, "display")
+	// Wire application service (agent-only; display broadcast via hub as original).
+	agentService := agentapp.NewService(agentRegistry, agentHub, displayHub, log)
 
-	connectHandler := &handler.ConnectHandler{
-		Hub:        agentHub,
+	// Thin transport handlers: only decode/upgrade + delegate to service.
+	agentWSHandler := &websocket.AgentHandler{
+		Service: agentService,
+		Log:     log,
+	}
+	displayWSHandler := &websocket.DisplayHandler{
+		Service:    agentService,
 		DisplayHub: displayHub,
-		Registry:   agentRegistry,
 		Log:        log,
 	}
-
-	displayHandler := &handler.DisplayHandler{
-		DisplayHub:      displayHub,
-		DisplayRegistry: displayRegistry,
-		Log:             log,
+	capabilitiesHTTPHandler := &httptransport.CapabilitiesHandler{
+		Service: agentService,
 	}
 
-	// CapabilitiesHandler exposes registered agent capabilities (agent_name,
-	// function_name, schema) for clients *and* handles /invoke (forwards to
-	// agent WS via hub). Reflects runtime registrations only.
-	capabilitiesHandler := &handler.CapabilitiesHandler{
-		Registry: agentRegistry,
-		// Hub for forwarding commands to agents (echo etc.).
-		Hub: agentHub,
-		Log: log,
-	}
-
+	// Setup routes using layered handlers.
 	router := gin.Default()
-	router.GET("/connect", connectHandler.Handle)
-	router.GET("/display", displayHandler.Handle)
-	// GET /capabilities: discovery.
-	// POST /invoke: assemble/forward command to agent (client → orch → agent).
-	router.GET("/capabilities", capabilitiesHandler.Handle)
-	router.POST("/invoke", capabilitiesHandler.HandleInvoke)
+	router.GET("/connect", agentWSHandler.Handle)
+	router.GET("/display", displayWSHandler.Handle)
+	// /capabilities, /invoke via http transport.
+	router.GET("/capabilities", capabilitiesHTTPHandler.Handle)
+	router.POST("/invoke", capabilitiesHTTPHandler.HandleInvoke)
 
+	// Server config.
 	addr := envOr("LISTEN_ADDR", ":8080")
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: router,
 	}
 
-	// Graceful shutdown on SIGINT / SIGTERM.
+	// Graceful shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
