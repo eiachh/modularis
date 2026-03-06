@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -9,9 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/modularis/modularis/internal/domain"
+	pkgdisplay "github.com/modularis/modularis/pkg/display"
 )
 
 func main() {
@@ -28,111 +26,40 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	connectURL := *server + "/display"
-	log.Info("connecting to orchestrator", "url", connectURL)
+	log.Info("connecting to orchestrator", "server", *server)
 
-	conn, _, err := websocket.DefaultDialer.Dial(connectURL, nil)
+	d, err := pkgdisplay.Connect(*server)
 	if err != nil {
 		log.Error("failed to connect", "error", err)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer d.Close()
 
-	log.Info("connected, sending display_register message")
-
-	// --- Build and send display_register envelope -------------------------
-
-	regPayload, err := json.Marshal(domain.DisplayRegisterPayload{
-		Name: *name,
-		Type: *displayType,
-	})
+	events, err := d.Register(*name, *displayType)
 	if err != nil {
-		log.Error("failed to marshal display_register payload", "error", err)
+		log.Error("registration failed", "error", err)
 		os.Exit(1)
 	}
 
-	env := domain.Envelope{
-		Type:    domain.MessageTypeDisplayRegister,
-		Payload: regPayload,
-	}
-
-	if err := conn.WriteJSON(env); err != nil {
-		log.Error("failed to send display_register message", "error", err)
-		os.Exit(1)
-	}
-
-	// --- Wait for display_register_ack or error ---------------------------
-
-	var resp domain.Envelope
-	if err := conn.ReadJSON(&resp); err != nil {
-		log.Error("failed to read response", "error", err)
-		os.Exit(1)
-	}
-
-	switch resp.Type {
-	case domain.MessageTypeDisplayRegisterAck:
-		var ack domain.DisplayRegisterAckPayload
-		if err := json.Unmarshal(resp.Payload, &ack); err != nil {
-			log.Error("failed to decode display_register_ack", "error", err)
-			os.Exit(1)
-		}
-		log.Info("registered successfully", "display_id", ack.DisplayID)
-
-	case domain.MessageTypeError:
-		var errPayload domain.ErrorPayload
-		if err := json.Unmarshal(resp.Payload, &errPayload); err != nil {
-			log.Error("failed to decode error payload", "error", err)
-			os.Exit(1)
-		}
-		log.Error("registration rejected", "code", errPayload.Code, "message", errPayload.Message)
-		os.Exit(1)
-
-	default:
-		log.Error("unexpected response type", "type", resp.Type)
-		os.Exit(1)
-	}
-
-	// --- Listen for display messages --------------------------------------
-
+	log.Info("registered successfully", "display_id", d.ID, "name", d.Name)
 	log.Info("display running, listening for events (ctrl+c to stop)")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			var msg domain.Envelope
-			if err := conn.ReadJSON(&msg); err != nil {
-				log.Info("connection closed", "error", err)
+	for {
+		select {
+		case dp, ok := <-events:
+			if !ok {
+				log.Info("orchestrator closed the connection")
 				return
 			}
+			render(log, dp)
 
-			switch msg.Type {
-			case domain.MessageTypeDisplay:
-				var dp domain.DisplayPayload
-				if err := json.Unmarshal(msg.Payload, &dp); err != nil {
-					log.Warn("failed to decode display payload", "error", err)
-					continue
-				}
-				render(log, dp)
-
-			default:
-				log.Debug("received message", "type", msg.Type)
-			}
+		case <-sigCh:
+			log.Info("shutting down")
+			return
 		}
-	}()
-
-	select {
-	case <-sigCh:
-		log.Info("shutting down")
-		_ = conn.WriteMessage(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "display shutting down"),
-		)
-	case <-done:
-		log.Info("orchestrator closed the connection")
 	}
 }
 

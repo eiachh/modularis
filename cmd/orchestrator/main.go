@@ -12,6 +12,7 @@ import (
 
 	"github.com/modularis/modularis/internal/handler"
 	"github.com/modularis/modularis/internal/registry"
+	"github.com/modularis/modularis/internal/service"
 	"github.com/modularis/modularis/internal/ws"
 )
 
@@ -19,39 +20,49 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	agentRegistry := registry.New()
-	agentHub := ws.NewHub(log, "agent")
-
 	displayRegistry := registry.NewDisplayRegistry()
-	displayHub := ws.NewHub(log, "display")
 
-	connectHandler := &handler.ConnectHandler{
-		Hub:        agentHub,
-		DisplayHub: displayHub,
-		Registry:   agentRegistry,
-		Log:        log,
+	hubs := &ws.Hubs{
+		Agent:   ws.NewHub(log, "agent"),
+		Display: ws.NewHub(log, "display"),
+	}
+
+	agentSvc := &service.AgentService{
+		Registry: agentRegistry,
+		Hubs:     hubs,
+		Log:      log,
+	}
+
+	displaySvc := &service.DisplayService{
+		Registry: displayRegistry,
+		Hubs:     hubs,
+		Log:      log,
+	}
+
+	capabilitiesSvc := &service.CapabilitiesService{
+		Registry: agentRegistry,
+		Hub:      hubs.Agent,
+		Log:      log,
+	}
+
+	agentHandler := &handler.AgentHandler{
+		Service: agentSvc,
+		Log:     log,
 	}
 
 	displayHandler := &handler.DisplayHandler{
-		DisplayHub:      displayHub,
-		DisplayRegistry: displayRegistry,
-		Log:             log,
+		Service: displaySvc,
+		Log:     log,
 	}
 
-	// CapabilitiesHandler exposes registered agent capabilities (agent_name,
-	// function_name, schema) for clients *and* handles /invoke (forwards to
-	// agent WS via hub). Reflects runtime registrations only.
 	capabilitiesHandler := &handler.CapabilitiesHandler{
-		Registry: agentRegistry,
-		// Hub for forwarding commands to agents (echo etc.).
-		Hub: agentHub,
-		Log: log,
+		Service: capabilitiesSvc,
+		Log:     log,
 	}
 
 	router := gin.Default()
-	router.GET("/connect", connectHandler.Handle)
+	router.GET("/connect", agentHandler.Handle)
 	router.GET("/display", displayHandler.Handle)
-	// GET /capabilities: discovery.
-	// POST /invoke: assemble/forward command to agent (client → orch → agent).
 	router.GET("/capabilities", capabilitiesHandler.Handle)
 	router.POST("/invoke", capabilitiesHandler.HandleInvoke)
 
@@ -61,7 +72,6 @@ func main() {
 		Handler: router,
 	}
 
-	// Graceful shutdown on SIGINT / SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

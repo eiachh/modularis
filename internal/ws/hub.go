@@ -17,6 +17,12 @@ type Hub struct {
 	label string // human-readable label for log messages (e.g. "agent", "display")
 }
 
+// Hubs groups the agent and display hubs for shared wiring.
+type Hubs struct {
+	Agent   *Hub
+	Display *Hub
+}
+
 // NewHub creates a Hub ready to accept connections.
 // The label is used in log messages to distinguish between agent and display hubs.
 func NewHub(log *slog.Logger, label string) *Hub {
