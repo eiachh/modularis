@@ -3,19 +3,18 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/modularis/modularis/internal/domain"
-	pkgdisplay "github.com/modularis/modularis/pkg/display"
+	"github.com/modularis/modularis/pkg/display"
 )
 
 func main() {
 	name := flag.String("name", "", "display name (required)")
 	displayType := flag.String("type", "terminal", "display type (terminal, web, led, discord, ...)")
-	server := flag.String("server", "ws://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
 	flag.Parse()
 
 	if *name == "" {
@@ -24,52 +23,47 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	d := display.New(*server, *name, *displayType, 30*time.Second)
 
-	log.Info("connecting to orchestrator", "server", *server)
-
-	d, err := pkgdisplay.Connect(*server)
+	fmt.Printf("Connecting display %q to orchestrator...\n", *name)
+	id, messages, closed, err := d.Connect()
 	if err != nil {
-		log.Error("failed to connect", "error", err)
+		fmt.Fprintf(os.Stderr, "failed to connect display: %v\n", err)
 		os.Exit(1)
 	}
-	defer d.Close()
-
-	events, err := d.Register(*name, *displayType)
-	if err != nil {
-		log.Error("registration failed", "error", err)
-		os.Exit(1)
-	}
-
-	log.Info("registered successfully", "display_id", d.ID, "name", d.Name)
-	log.Info("display running, listening for events (ctrl+c to stop)")
+	fmt.Printf("Display connected and registered! (ID: %s)\n", id)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
 	for {
 		select {
-		case dp, ok := <-events:
+		case msg, ok := <-messages:
 			if !ok {
-				log.Info("orchestrator closed the connection")
+				fmt.Println("\n[DISPLAY] Message channel closed.")
 				return
 			}
-			render(log, dp)
-
+			render(msg)
+		case _, ok := <-closed:
+			if !ok {
+				return
+			}
+			fmt.Println("\n[DISPLAY] Connection to orchestrator lost! Waiting for reconnection...")
 		case <-sigCh:
-			log.Info("shutting down")
+			fmt.Println("\nShutting down...")
+			d.Close()
 			return
 		}
 	}
 }
 
-// render prints a display payload to the terminal.
-func render(log *slog.Logger, dp domain.DisplayPayload) {
+// render prints a display message to the terminal.
+func render(msg display.Message) {
 	fmt.Println("─────────────────────────────────────────")
-	fmt.Printf("  Agent : %s (%s)\n", dp.AgentName, dp.AgentID)
-	fmt.Printf("  Title : %s\n", dp.Title)
-	fmt.Printf("  Level : %s\n", dp.Level)
+	fmt.Printf("  Agent : %s (%s)\n", msg.AgentName, msg.AgentID)
+	fmt.Printf("  Title : %s\n", msg.Title)
+	fmt.Printf("  Level : %s\n", msg.Level)
 	fmt.Println("─────────────────────────────────────────")
-	fmt.Println(dp.Body)
+	fmt.Println(msg.Body)
 	fmt.Println()
 }
