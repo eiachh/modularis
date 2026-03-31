@@ -12,6 +12,9 @@ import (
 // Invocation represents a capability that an agent can register,
 // or an invocation request from the orchestrator.
 type Invocation struct {
+	// ID is the unique capability/invocation ID assigned by the orchestrator.
+	// Present on invocations received from the orchestrator; empty for registrations.
+	ID string `json:"id,omitempty"`
 	// Name is the unique identifier for this capability (e.g., "echo", "scream").
 	Name string `json:"name"`
 	// Args is the JSON Schema describing the expected input arguments (for registration)
@@ -31,6 +34,11 @@ type Agent struct {
 	invocations     chan Invocation
 	closed          chan struct{}
 	maxBackoff      time.Duration
+
+	// handlers maps capability function names to their handler functions.
+	// When a command arrives for a capability with a handler, the handler is
+	// invoked and its result is sent back as a command_result message.
+	handlers map[string]func(json.RawMessage) json.RawMessage
 }
 
 // New creates a new Agent instance configured with the given orchestrator URL,
@@ -44,12 +52,17 @@ func New(orchestratorURL, agentName string, maxBackoff time.Duration) *Agent {
 		invocations:     make(chan Invocation, 100),
 		closed:          make(chan struct{}, 1),
 		maxBackoff:      maxBackoff,
+		handlers:        make(map[string]func(json.RawMessage) json.RawMessage),
 	}
 }
 
 // AddCapability registers a capability schema with the agent.
 // This should be called before Connect to ensure all capabilities are registered
 // upon connection to the orchestrator.
+//
+// Capabilities registered with AddCapability are fire-and-forget: invocations
+// are delivered via the invocations channel returned by Connect(); the agent
+// application is responsible for processing and responding (e.g., via display).
 func (a *Agent) AddCapability(name string, schema json.RawMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -58,6 +71,27 @@ func (a *Agent) AddCapability(name string, schema json.RawMessage) {
 		Name: name,
 		Args: schema,
 	})
+}
+
+// AddCapabilityWithHandler registers a capability with a handler function.
+// When the orchestrator sends a command for this capability, the handler is
+// invoked with the raw args JSON and its return value (raw result JSON) is
+// sent back to the orchestrator as a command_result message.
+//
+// This enables a request-response pattern: the caller can correlate the result
+// using the capability_id from the invocation.
+//
+// The handler receives the invocation args and should return the result payload.
+// Returning nil or an empty slice is valid (no result data).
+func (a *Agent) AddCapabilityWithHandler(name string, schema json.RawMessage, handler func(args json.RawMessage) json.RawMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.capabilities = append(a.capabilities, Invocation{
+		Name: name,
+		Args: schema,
+	})
+	a.handlers[name] = handler
 }
 
 // Connect establishes a WebSocket connection to the orchestrator and registers
@@ -187,23 +221,63 @@ func (a *Agent) readLoop() {
 
 		if env.Type == "command" {
 			var inv struct {
+				CapabilityID string          `json:"capability_id"`
 				FunctionName string          `json:"function_name"`
 				Args         json.RawMessage `json:"args"`
 			}
 			if err := json.Unmarshal(env.Payload, &inv); err == nil {
-				// Map to our unified struct
-				cmd := Invocation{
-					Name: inv.FunctionName,
-					Args: inv.Args,
-				}
-				// Non-blocking send
-				select {
-				case a.invocations <- cmd:
-				default:
+				// Check if a handler is registered for this capability.
+				a.mu.Lock()
+				handler, hasHandler := a.handlers[inv.FunctionName]
+				a.mu.Unlock()
+
+				if hasHandler {
+					// Request-response mode: invoke handler and send result back.
+					var result json.RawMessage
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								// Handler panicked; send error result
+								result, _ = json.Marshal(map[string]any{"error": fmt.Sprintf("panic: %v", r)})
+							}
+						}()
+						result = handler(inv.Args)
+					}()
+					// Send command_result to orchestrator
+					a.sendCommandResult(inv.CapabilityID, result)
+				} else {
+					// Fire-and-forget mode: deliver via channel for app to handle.
+					cmd := Invocation{
+						ID:   inv.CapabilityID,
+						Name: inv.FunctionName,
+						Args: inv.Args,
+					}
+					select {
+					case a.invocations <- cmd:
+					default:
+					}
 				}
 			}
 		}
 	}
+}
+
+// sendCommandResult sends a command_result message back to the orchestrator
+// with the given capability ID and result payload.
+func (a *Agent) sendCommandResult(capabilityID string, result json.RawMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.conn == nil {
+		return
+	}
+
+	payload := map[string]any{
+		"capability_id": capabilityID,
+		"result":        result,
+	}
+	msg := envelope{Type: "command_result", Payload: mustMarshal(payload)}
+	_ = a.conn.WriteJSON(msg)
 }
 
 // Close closes the WebSocket connection to the orchestrator.

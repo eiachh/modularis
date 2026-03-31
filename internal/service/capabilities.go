@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"github.com/eiachh/Modularis/internal/domain"
+	"github.com/eiachh/Modularis/internal/invokeresult"
 	"github.com/eiachh/Modularis/internal/registry"
 	"github.com/eiachh/Modularis/internal/ws"
 	"github.com/eiachh/Modularis/pkg"
@@ -12,9 +15,10 @@ import (
 
 // CapabilitiesService handles capability discovery and command invocation.
 type CapabilitiesService struct {
-	Registry *registry.Registry
-	Hub      *ws.Hub
-	Log      *slog.Logger
+	Registry    *registry.Registry
+	Hub         *ws.Hub
+	Log         *slog.Logger
+	ResultStore *invokeresult.Store
 }
 
 // ListSummaries returns a flat list of all capabilities across all agents.
@@ -86,7 +90,17 @@ func (s *CapabilitiesService) Invoke(req pkg.InvokeCommand) (domain.CommandResul
 		}, fmt.Errorf("agent not connected")
 	}
 
+	// Generate a unique capability/invocation ID for this request.
+	// This is passed to the agent so it can correlate invoke_result responses.
+	invocationID := uuid.New().String()
+
+	// Create a pending result entry so clients can wait via GET /invoke/result/:id
+	if s.ResultStore != nil {
+		s.ResultStore.Create(invocationID)
+	}
+
 	cmdPayload := domain.CommandPayload{
+		CapabilityID: invocationID,
 		AgentID:      agent.ID,
 		AgentName:    req.AgentName,
 		FunctionName: req.FunctionName,
@@ -107,8 +121,9 @@ func (s *CapabilitiesService) Invoke(req pkg.InvokeCommand) (domain.CommandResul
 	)
 
 	return domain.CommandResultPayload{
-		Success: true,
-		Result:  fmt.Sprintf("command %q forwarded (see display for echo)", req.FunctionName),
+		InvocationID: invocationID,
+		Success:      true,
+		Result:       fmt.Sprintf("command %q forwarded (see display for echo)", req.FunctionName),
 	}, nil
 }
 

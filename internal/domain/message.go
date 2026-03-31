@@ -159,6 +159,9 @@ type CapabilitySummary struct {
 // invocation to an agent's WebSocket connection (adds AgentID). Public
 // equivalent for clients is pkg.InvokeCommand (in pkg/ for third-party use).
 type CommandPayload struct {
+	// CapabilityID is a unique identifier for this invocation. It is passed
+	// to the agent so it can correlate responses (invoke_result).
+	CapabilityID string `json:"capability_id"`
 	// AgentID is resolved by orchestrator from name (for WS routing).
 	AgentID string `json:"agent_id"`
 	// AgentName for logging/echo to display.
@@ -173,6 +176,9 @@ type CommandPayload struct {
 // For echo, we primarily use display broadcast instead.
 // (Internal; public in use via pkg if expanded.)
 type CommandResultPayload struct {
+	// InvocationID is the unique ID for this invocation (returned immediately
+	// to client; used to poll/wait for result via GET /invoke/result/:id).
+	InvocationID string `json:"invocation_id,omitempty"`
 	// Success indicates if the command executed without error.
 	Success bool `json:"success"`
 	// Result holds output (e.g., echoed message).
