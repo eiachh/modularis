@@ -81,30 +81,90 @@ func (c *Client) GetCapabilities() ([]Capability, error) {
 	return capabilities, nil
 }
 
-// Invoke sends a command to the orchestrator for execution on the specified agent.
-// The InvokeCommand should be constructed with valid agent name, function name, and args.
-func (c *Client) Invoke(cmd InvokeCommand) error {
+// InvokeResponse is returned immediately by Invoke with the invocation ID.
+type InvokeResponse struct {
+	InvocationID string `json:"invocation_id"`
+	Success      bool   `json:"success"`
+	Result       string `json:"result,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+// Invoke sends a command to the orchestrator and returns immediately with an
+// invocation ID. Use GetInvokeResult(invocationID) to wait for and retrieve
+// the result (blocking until the agent responds or acknowledges).
+func (c *Client) Invoke(cmd InvokeCommand) (InvokeResponse, error) {
 	url := c.serverAddress + "/invoke"
 
 	payload, err := json.Marshal(cmd)
 	if err != nil {
-		return fmt.Errorf("failed to marshal invoke command: %w", err)
+		return InvokeResponse{}, fmt.Errorf("failed to marshal invoke command: %w", err)
 	}
 
 	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return ErrConnNotReady
+		return InvokeResponse{}, ErrConnNotReady
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read invoke response: %w", err)
+		return InvokeResponse{}, fmt.Errorf("failed to read invoke response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("invoke failed with status %s: %s", resp.Status, string(body))
+		return InvokeResponse{}, fmt.Errorf("invoke failed with status %s: %s", resp.Status, string(body))
 	}
 
-	return nil
+	var ir InvokeResponse
+	if err := json.Unmarshal(body, &ir); err != nil {
+		return InvokeResponse{}, fmt.Errorf("failed to decode invoke response: %w", err)
+	}
+	return ir, nil
+}
+
+// InvokeResult is the result returned by GetInvokeResult.
+type InvokeResult struct {
+	CapabilityID string          `json:"capability_id"`
+	Success      bool            `json:"success"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	Error        string          `json:"error,omitempty"`
+}
+
+// GetInvokeResult blocks until the result for the given invocation ID is
+// available from the orchestrator, then returns it. For fire-and-forget
+// capabilities, the result may have success=true with empty result data
+// (acknowledged only).
+func (c *Client) GetInvokeResult(invocationID string) (InvokeResult, error) {
+	url := fmt.Sprintf("%s/invoke/result/%s", c.serverAddress, invocationID)
+
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return InvokeResult{}, ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return InvokeResult{}, fmt.Errorf("failed to read result: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return InvokeResult{}, fmt.Errorf("invocation not found")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return InvokeResult{}, fmt.Errorf("result request failed with status %s: %s", resp.Status, string(body))
+	}
+
+	var ir InvokeResult
+	if err := json.Unmarshal(body, &ir); err != nil {
+		// Might be {"status":"acknowledged"} for fire-and-forget
+		var ack struct {
+			Status string `json:"status"`
+		}
+		if err2 := json.Unmarshal(body, &ack); err2 == nil && ack.Status == "acknowledged" {
+			return InvokeResult{Success: true}, nil
+		}
+		return InvokeResult{}, fmt.Errorf("failed to decode result: %w", err)
+	}
+	return ir, nil
 }

@@ -14,6 +14,31 @@ import (
 	"github.com/eiachh/Modularis/internal/domain"
 )
 
+// mustMarshal panics on marshal error (for static/safe data).
+func mustMarshal(v any) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+// sendAck sends a minimal command_result acknowledgment to the orchestrator.
+func sendAck(conn *websocket.Conn, capabilityID string, log *slog.Logger) {
+	payload := map[string]any{
+		"capability_id": capabilityID,
+		"result":        nil,
+	}
+	if err := conn.WriteJSON(domain.Envelope{
+		Type:    domain.MessageTypeCommandResult,
+		Payload: mustMarshal(payload),
+	}); err != nil {
+		log.Error("failed to send ack", "capability_id", capabilityID, "error", err)
+	} else {
+		log.Info("sent acknowledgment", "capability_id", capabilityID)
+	}
+}
+
 func main() {
 	name := flag.String("name", "", "agent name (required)")
 	server := flag.String("server", "ws://localhost:8080", "orchestrator base URL")
@@ -92,43 +117,44 @@ func main() {
 			Payload: dpPayload,
 		})
 
-		// --- Register the *only* capability: echo (runtime-only, no legacy) --
+		// --- Register capabilities (runtime-only, no legacy) --------------------
 		//
-		// After WS upgrade, dynamically register "echo" via capability_register.
-		// This is the sole command; it echoes input to display. In real agents,
-		// this would come from loaded components.
-		capReg := domain.CapabilityRegisterPayload{
-			AgentName:    *name,
-			FunctionName: "echo",
-			// JSON schema for required arg (message to echo).
-			Schema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"message": {
-						"type": "string",
-						"description": "Message to echo back to display"
-					}
-				},
-				"required": ["message"]
-			}`),
-		}
-		capRegPayload, marshalErr := json.Marshal(capReg)
-		if marshalErr != nil {
-			log.Error("failed to marshal capability_register payload", "error", marshalErr)
-		} else if err := conn.WriteJSON(domain.Envelope{
-			Type:    domain.MessageTypeCapabilityRegister,
-			Payload: capRegPayload,
-		}); err != nil {
-			log.Error("failed to send capability_register", "error", err)
-		} else {
-			log.Info("sent runtime capability registration",
-				"function_name", capReg.FunctionName,
-				"agent_name", capReg.AgentName,
-			)
-			// Orchestrator acks; logged in background read loop.
+		// 1) echoNoReturn: fire-and-forget; echoes to display only.
+		// 2) echoRespond: request-response; echoes to display AND sends command_result.
+		// 3) echoTimeout: never responds (for testing missing-response behavior).
+		schemas := json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"message": {
+					"type": "string",
+					"description": "Message to echo"
+				}
+			},
+			"required": ["message"]
+		}`)
+
+		for _, fn := range []string{"echoNoReturn", "echoRespond", "echoTimeout"} {
+			capReg := domain.CapabilityRegisterPayload{
+				AgentName:    *name,
+				FunctionName: fn,
+				Schema:       schemas,
+			}
+			capRegPayload, marshalErr := json.Marshal(capReg)
+			if marshalErr != nil {
+				log.Error("failed to marshal capability_register payload", "error", marshalErr)
+				continue
+			}
+			if err := conn.WriteJSON(domain.Envelope{
+				Type:    domain.MessageTypeCapabilityRegister,
+				Payload: capRegPayload,
+			}); err != nil {
+				log.Error("failed to send capability_register", "function", fn, "error", err)
+			} else {
+				log.Info("registered capability", "function_name", fn)
+			}
 		}
 
-		// Note: Command handling ("echo") is in the background read loop below
+		// Note: Command handling is in the background read loop below
 		// (receives forwarded commands from orchestrator).
 
 	case domain.MessageTypeError:
@@ -173,21 +199,25 @@ func main() {
 					log.Error("invalid command payload", "error", err)
 					continue
 				}
-				log.Info("received command", "function", cmd.FunctionName, "agent", cmd.AgentName)
+				log.Info("received command",
+					"function", cmd.FunctionName,
+					"capability_id", cmd.CapabilityID,
+				)
 
-				// Only "echo" registered/supported: echo args to display.
-				// (No legacy/other funcs.)
-				if cmd.FunctionName == "echo" {
-					var args struct {
-						Message string `json:"message"`
-					}
-					if err := json.Unmarshal(cmd.Args, &args); err != nil {
-						log.Error("invalid echo args", "error", err)
-						continue
-					}
-					// Echo to display modules via existing payload.
+				// Parse common args (all three take a "message" string).
+				var args struct {
+					Message string `json:"message"`
+				}
+				if err := json.Unmarshal(cmd.Args, &args); err != nil {
+					log.Error("invalid args", "function", cmd.FunctionName, "error", err)
+					continue
+				}
+
+				switch cmd.FunctionName {
+				case "echoNoReturn":
+					// Fire-and-forget: echo to display, then acknowledge.
 					dpPayload, _ := json.Marshal(domain.DisplayPayload{
-						Title: fmt.Sprintf("Echo from %s", cmd.AgentName),
+						Title: fmt.Sprintf("EchoNoReturn from %s", cmd.AgentName),
 						Body:  fmt.Sprintf("Echo: %s", args.Message),
 						Level: "info",
 					})
@@ -195,11 +225,51 @@ func main() {
 						Type:    domain.MessageTypeDisplay,
 						Payload: dpPayload,
 					}); err != nil {
-						log.Error("failed to broadcast echo to display", "error", err)
+						log.Error("failed to broadcast echoNoReturn to display", "error", err)
 					} else {
-						log.Info("echo sent to display", "message", args.Message)
+						log.Info("echoNoReturn sent to display", "message", args.Message)
 					}
-				} else {
+					// Acknowledge (no result data)
+					sendAck(conn, cmd.CapabilityID, log)
+
+				case "echoRespond":
+					// Request-response: echo to display AND send command_result.
+					dpPayload, _ := json.Marshal(domain.DisplayPayload{
+						Title: fmt.Sprintf("EchoRespond from %s", cmd.AgentName),
+						Body:  fmt.Sprintf("Echo: %s", args.Message),
+						Level: "info",
+					})
+					_ = conn.WriteJSON(domain.Envelope{
+						Type:    domain.MessageTypeDisplay,
+						Payload: dpPayload,
+					})
+					log.Info("echoRespond sent to display", "message", args.Message)
+
+					// Send command_result back to orchestrator.
+					resultPayload := map[string]any{
+						"capability_id": cmd.CapabilityID,
+						"result":        map[string]string{"message": args.Message},
+					}
+					if err := conn.WriteJSON(domain.Envelope{
+						Type:    domain.MessageTypeCommandResult,
+						Payload: mustMarshal(resultPayload),
+					}); err != nil {
+						log.Error("failed to send command_result", "capability_id", cmd.CapabilityID, "error", err)
+					} else {
+						log.Info("echoRespond sent command_result",
+							"capability_id", cmd.CapabilityID,
+							"result", args.Message,
+						)
+					}
+
+				case "echoTimeout":
+					// Never responds: just log (for testing missing response).
+					log.Info("echoTimeout received — intentionally not responding",
+						"capability_id", cmd.CapabilityID,
+						"message", args.Message,
+					)
+
+				default:
 					log.Warn("unknown command", "function", cmd.FunctionName)
 				}
 

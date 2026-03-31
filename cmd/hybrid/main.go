@@ -224,9 +224,10 @@ func processCommand(c *client.Client, capabilities []client.Capability, input st
 	}
 
 	fmt.Printf("Invoking %s:%s...\n", targetCap.AgentName, targetCap.FunctionName)
-	if err := c.Invoke(cmd); err != nil {
+	resp, err := c.Invoke(cmd)
+	if err != nil {
 		fmt.Printf("Invoke failed: %v\n", err)
 	} else {
-		fmt.Println("Command sent successfully!")
+		fmt.Printf("Command sent! InvocationID: %s\n", resp.InvocationID)
 	}
 }

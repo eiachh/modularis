@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/eiachh/Modularis/internal/domain"
+	"github.com/eiachh/Modularis/internal/invokeresult"
 	"github.com/eiachh/Modularis/internal/service"
 	"github.com/eiachh/Modularis/internal/ws"
 )
@@ -22,8 +23,9 @@ var upgrader = websocket.Upgrader{
 
 // AgentHandler manages the agent WebSocket lifecycle.
 type AgentHandler struct {
-	Service *service.AgentService
-	Log     *slog.Logger
+	Service     *service.AgentService
+	Log         *slog.Logger
+	ResultStore *invokeresult.Store
 }
 
 // Handle upgrades the connection, registers the agent, then enters the read loop.
@@ -89,6 +91,32 @@ func (h *AgentHandler) readLoop(conn *ws.Conn, agent *domain.Agent) {
 			h.Service.BroadcastDisplay(agent, env.Payload)
 		case domain.MessageTypeCapabilityRegister:
 			h.handleCapabilityRegister(conn, agent, env.Payload)
+		case domain.MessageTypeCommandResult:
+			// Parse command_result and store in the result store.
+			var cr struct {
+				CapabilityID string          `json:"capability_id"`
+				Result       json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal(env.Payload, &cr); err != nil {
+				h.Log.Warn("invalid command_result payload", "agent_id", agent.ID, "error", err)
+				continue
+			}
+			if h.ResultStore != nil && cr.CapabilityID != "" {
+				h.ResultStore.Set(cr.CapabilityID, &invokeresult.Result{
+					CapabilityID: cr.CapabilityID,
+					Success:      true,
+					Result:       cr.Result,
+				})
+				h.Log.Info("stored invoke result",
+					"capability_id", cr.CapabilityID,
+					"agent_id", agent.ID,
+				)
+			} else {
+				h.Log.Debug("received command_result (no store)",
+					"agent_id", agent.ID,
+					"capability_id", cr.CapabilityID,
+				)
+			}
 		default:
 			h.Log.Warn("unknown message type", "agent_id", agent.ID, "type", env.Type)
 			_ = h.sendError(conn, "UNEXPECTED_MESSAGE", fmt.Sprintf("unsupported message type %q", env.Type))
