@@ -11,8 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/eiachh/Modularis/internal/activitylog"
+	"github.com/eiachh/Modularis/internal/auth"
 	"github.com/eiachh/Modularis/internal/handler"
 	"github.com/eiachh/Modularis/internal/invokeresult"
+	"github.com/eiachh/Modularis/internal/policy"
 	"github.com/eiachh/Modularis/internal/registry"
 	"github.com/eiachh/Modularis/internal/service"
 	"github.com/eiachh/Modularis/internal/ws"
@@ -35,6 +37,12 @@ func main() {
 	// Store for invocation results (for GetInvokeResult blocking)
 	resultStore := invokeresult.New()
 
+	// SU token manager: Ed25519 keys + one-time SU token generation
+	suManager := auth.NewSUManager()
+
+	// Policy store (in-memory): roles and per-identity policies
+	policyStore := policy.NewStore()
+
 	agentSvc := &service.AgentService{
 		Registry: agentRegistry,
 		Hubs:     hubs,
@@ -52,12 +60,14 @@ func main() {
 		Hub:         hubs.Agent,
 		Log:         log,
 		ResultStore: resultStore,
+		Policy:      policyStore,
 	}
 
 	agentHandler := &handler.AgentHandler{
 		Service:     agentSvc,
 		Log:         log,
 		ResultStore: resultStore,
+		Policy:      policyStore,
 	}
 
 	displayHandler := &handler.DisplayHandler{
@@ -69,6 +79,16 @@ func main() {
 		Service:     capabilitiesSvc,
 		Log:         log,
 		ActivityLog: activityLog,
+		SUManager:   suManager,
+	}
+
+	authHandler := &handler.AuthHandler{
+		SUManager: suManager,
+	}
+
+	policyHandler := &handler.PolicyHandler{
+		SUManager: suManager,
+		Store:     policyStore,
 	}
 
 	router := gin.Default()
@@ -79,6 +99,19 @@ func main() {
 	// Apply activity logging middleware specifically to /invoke route
 	router.POST("/invoke", activitylog.Middleware(activityLog, "invoke"), capabilitiesHandler.HandleInvoke)
 	router.GET("/invoke/result/:id", capabilitiesHandler.HandleInvokeResult)
+
+	// SU token endpoint: generates Ed25519-signed super-user token (one-time only)
+	router.POST("/su/token", authHandler.HandleGenerateSUToken)
+
+	// Default token endpoint: clients request an opaque token (no permissions by default)
+	router.POST("/token", authHandler.HandleGenerateDefaultToken)
+
+	// Policy admin endpoints (SU-only via Authorization: Bearer <SU token>)
+	router.POST("/policy/role", policyHandler.HandleCreateRole)
+	router.POST("/policy", policyHandler.HandleCreatePolicy)
+	router.GET("/policy/roles", policyHandler.HandleListRoles)
+	router.GET("/policy/:identity", policyHandler.HandleGetPolicy)
+	router.GET("/policies", policyHandler.HandleListPolicies)
 
 	addr := envOr("LISTEN_ADDR", ":8080")
 	srv := &http.Server{

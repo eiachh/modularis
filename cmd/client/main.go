@@ -10,12 +10,28 @@ import (
 	"github.com/eiachh/Modularis/pkg/client"
 )
 
+// Policy Engine Demo
+// ==================
+// This client supports tokens for policy-protected calls.
+//
+// Usage with policy:
+//   1. Get a token:    curl -X POST http://localhost:8080/token
+//   2. Try invoke:     go run ./cmd/client -agent echo-agent -token <TOKEN>
+//   3. SU grants:      (see examples/policy-demo.sh)
+//   4. Retry invoke:   should succeed now
+//
+// Without -token, calls will fail with 401 (missing token required by orchestrator).
+
 func main() {
 	server := flag.String("server", "http://localhost:8080", "orchestrator address")
 	agent := flag.String("agent", "myagent", "agent name")
+	token := flag.String("token", "", "bearer token for Authorization header (for policy-protected calls)")
 	flag.Parse()
 
 	c := client.New(*server)
+	if *token != "" {
+		c.SetToken(*token)
+	}
 
 	// Test cases
 	tests := []struct {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/eiachh/Modularis/internal/domain"
 	"github.com/eiachh/Modularis/internal/invokeresult"
+	"github.com/eiachh/Modularis/internal/policy"
 	"github.com/eiachh/Modularis/internal/service"
 	"github.com/eiachh/Modularis/internal/ws"
 )
@@ -26,6 +27,7 @@ type AgentHandler struct {
 	Service     *service.AgentService
 	Log         *slog.Logger
 	ResultStore *invokeresult.Store
+	Policy      *policy.Store // for creating default empty policy on agent register
 }
 
 // Handle upgrades the connection, registers the agent, then enters the read loop.
@@ -59,6 +61,11 @@ func (h *AgentHandler) Handle(c *gin.Context) {
 		_ = h.sendError(conn, "REGISTRATION_FAILED", err.Error())
 		h.closeConn(conn)
 		return
+	}
+
+	// Ensure a default empty policy for this agent identity
+	if h.Policy != nil {
+		h.Policy.EnsurePolicy(reg.Name)
 	}
 
 	if err := conn.SendEnvelope(domain.MessageTypeRegisterAck, domain.RegisterAckPayload{AgentID: agent.ID}); err != nil {
