@@ -41,7 +41,7 @@ func sendAck(conn *websocket.Conn, capabilityID string, log *slog.Logger) {
 
 func main() {
 	name := flag.String("name", "", "agent name (required)")
-	server := flag.String("server", "ws://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "ws://localhost:18080", "orchestrator base URL")
 	flag.Parse()
 
 	if *name == "" {

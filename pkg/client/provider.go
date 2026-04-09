@@ -37,9 +37,11 @@ type InvokeCommand struct {
 
 // Client provides functionality for interacting with a modularis orchestrator.
 // It can fetch capabilities and assemble validated commands for invocation.
+// Optionally holds a token for Authorization: Bearer header.
 type Client struct {
 	serverAddress string
 	httpClient    *http.Client
+	token         string // optional: Authorization: Bearer <token>
 }
 
 // New creates a new Client instance configured with the given server address.
@@ -51,13 +53,32 @@ func New(serverAddress string) *Client {
 	}
 }
 
+// SetToken sets the bearer token for Authorization header on all requests.
+func (c *Client) SetToken(token string) {
+	c.token = token
+}
+
+// Token returns the current token (if any).
+func (c *Client) Token() string {
+	return c.token
+}
+
 // GetCapabilities fetches the list of all registered capabilities from the server.
 // It returns a slice of Capability containing agent names, function names,
 // and their respective JSON schemas.
+// If a token was set via SetToken, it is sent as Authorization: Bearer.
 func (c *Client) GetCapabilities() ([]Capability, error) {
 	url := c.serverAddress + "/capabilities"
 
-	resp, err := c.httpClient.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, ErrConnNotReady
 	}
@@ -92,6 +113,7 @@ type InvokeResponse struct {
 // Invoke sends a command to the orchestrator and returns immediately with an
 // invocation ID. Use GetInvokeResult(invocationID) to wait for and retrieve
 // the result (blocking until the agent responds or acknowledges).
+// If a token was set via SetToken, it is sent as Authorization: Bearer.
 func (c *Client) Invoke(cmd InvokeCommand) (InvokeResponse, error) {
 	url := c.serverAddress + "/invoke"
 
@@ -100,7 +122,16 @@ func (c *Client) Invoke(cmd InvokeCommand) (InvokeResponse, error) {
 		return InvokeResponse{}, fmt.Errorf("failed to marshal invoke command: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return InvokeResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return InvokeResponse{}, ErrConnNotReady
 	}
@@ -134,10 +165,19 @@ type InvokeResult struct {
 // available from the orchestrator, then returns it. For fire-and-forget
 // capabilities, the result may have success=true with empty result data
 // (acknowledged only).
+// If a token was set via SetToken, it is sent as Authorization: Bearer.
 func (c *Client) GetInvokeResult(invocationID string) (InvokeResult, error) {
 	url := fmt.Sprintf("%s/invoke/result/%s", c.serverAddress, invocationID)
 
-	resp, err := c.httpClient.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return InvokeResult{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return InvokeResult{}, ErrConnNotReady
 	}

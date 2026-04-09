@@ -3,11 +3,13 @@ package handler
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/eiachh/Modularis/internal/activitylog"
+	"github.com/eiachh/Modularis/internal/auth"
 	"github.com/eiachh/Modularis/internal/service"
 	"github.com/eiachh/Modularis/pkg"
 )
@@ -17,6 +19,7 @@ type CapabilitiesHandler struct {
 	Service     *service.CapabilitiesService
 	Log         *slog.Logger
 	ActivityLog *activitylog.Log
+	SUManager   *auth.SUManager // for validating token signatures (opaque tokens)
 }
 
 // Handle returns all registered capabilities.
@@ -63,11 +66,16 @@ func (h *CapabilitiesHandler) HandleInvokeResult(c *gin.Context) {
 }
 
 // HandleInvoke validates and forwards an invocation request.
-// The activity log middleware (applied in routing) already recorded a base
-// "invoke" activity with an ID before this handler runs. Here we extend
-// that activity with invocation-specific details (agent, function) after
-// parsing the request body.
+// Requires Authorization: Bearer <token>. Token is opaque — only signature is verified.
+// Identity for policy lookup is the token string itself.
 func (h *CapabilitiesHandler) HandleInvoke(c *gin.Context) {
+	// Extract identity from Authorization header (opaque token)
+	identity := extractIdentityFromAuth(c, h.SUManager)
+	if identity == "" {
+		c.JSON(http.StatusUnauthorized, map[string]any{"success": false, "error": "missing or invalid token"})
+		return
+	}
+
 	var req pkg.InvokeCommand
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Log.Warn("invalid invoke request", "error", err)
@@ -85,16 +93,16 @@ func (h *CapabilitiesHandler) HandleInvoke(c *gin.Context) {
 				Type:      "invoke",
 				Timestamp: time.Now().UTC(),
 				Data: map[string]any{
-					"path":         c.Request.URL.Path,
-					"method":       c.Request.Method,
-					"agent_name":   req.AgentName,
+					"path":          c.Request.URL.Path,
+					"method":        c.Request.Method,
+					"agent_name":    req.AgentName,
 					"function_name": req.FunctionName,
 				},
 			})
 		}
 	}
 
-	result, err := h.Service.Invoke(req)
+	result, err := h.Service.Invoke(req, identity)
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch result.Error {
@@ -104,11 +112,41 @@ func (h *CapabilitiesHandler) HandleInvoke(c *gin.Context) {
 				status = resolveInvokeStatus(result.Error)
 			}
 		}
+		// Map forbidden to 403
+		if result.Error == "forbidden" {
+			status = http.StatusForbidden
+		}
 		c.JSON(status, result)
 		return
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+// extractIdentityFromAuth reads Authorization: Bearer <token>, validates signature,
+// and returns the token string as the identity. Returns "" if missing or invalid.
+func extractIdentityFromAuth(c *gin.Context, su *auth.SUManager) string {
+	authz := c.GetHeader("Authorization")
+	if authz == "" {
+		return ""
+	}
+	const prefix = "Bearer "
+	if !strings.HasPrefix(authz, prefix) {
+		return ""
+	}
+	token := strings.TrimPrefix(authz, prefix)
+	if token == "" {
+		return ""
+	}
+	if su == nil {
+		// If no SUManager configured, accept any non-empty token (dev mode)
+		return token
+	}
+	if err := su.ValidateTokenSignature(token); err != nil {
+		return ""
+	}
+	// Token is valid (signature OK). Identity = token string (opaque).
+	return token
 }
 
 // resolveInvokeStatus maps known error messages to appropriate HTTP status codes.

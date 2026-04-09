@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/eiachh/Modularis/internal/domain"
 	"github.com/eiachh/Modularis/internal/invokeresult"
+	"github.com/eiachh/Modularis/internal/policy"
 	"github.com/eiachh/Modularis/internal/registry"
 	"github.com/eiachh/Modularis/internal/ws"
 	"github.com/eiachh/Modularis/pkg"
@@ -19,6 +21,7 @@ type CapabilitiesService struct {
 	Hub         *ws.Hub
 	Log         *slog.Logger
 	ResultStore *invokeresult.Store
+	Policy      *policy.Store
 }
 
 // ListSummaries returns a flat list of all capabilities across all agents.
@@ -46,7 +49,19 @@ func (s *CapabilitiesService) ListSummaries() []domain.CapabilitySummary {
 
 // Invoke resolves the target agent, validates args against the capability
 // schema, and forwards the command over the agent's WebSocket connection.
-func (s *CapabilitiesService) Invoke(req pkg.InvokeCommand) (domain.CommandResultPayload, error) {
+// identity is the caller's identity (token string for HTTP clients, agent name for WS).
+// Policy authorization is enforced before proceeding.
+func (s *CapabilitiesService) Invoke(req pkg.InvokeCommand, identity string) (domain.CommandResultPayload, error) {
+	// Policy check first (default deny)
+	if s.Policy != nil {
+		if !s.Policy.Authorize(identity, req.AgentName, req.FunctionName) {
+			return domain.CommandResultPayload{
+				Success: false,
+				Error:   "forbidden",
+			}, errors.New("forbidden")
+		}
+	}
+
 	agent := s.Registry.GetByName(req.AgentName)
 	if agent == nil {
 		return domain.CommandResultPayload{
