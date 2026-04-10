@@ -50,15 +50,25 @@ func (s *CapabilitiesService) ListSummaries() []domain.CapabilitySummary {
 // Invoke resolves the target agent, validates args against the capability
 // schema, and forwards the command over the agent's WebSocket connection.
 // identity is the caller's identity (token string for HTTP clients, agent name for WS).
-// Policy authorization is enforced before proceeding.
+// Policy authorization is enforced before proceeding, with delegation support.
 func (s *CapabilitiesService) Invoke(req pkg.InvokeCommand, identity string) (domain.CommandResultPayload, error) {
-	// Policy check first (default deny)
+	// Policy check first (default deny), with delegation support
 	if s.Policy != nil {
-		if !s.Policy.Authorize(identity, req.AgentName, req.FunctionName) {
+		allowed, effectiveIdentity := s.Policy.AuthorizeWithDelegation(identity, req.AgentName, req.FunctionName)
+		if !allowed {
 			return domain.CommandResultPayload{
 				Success: false,
 				Error:   "forbidden",
 			}, errors.New("forbidden")
+		}
+		// Log if acting via delegation
+		if effectiveIdentity != identity {
+			s.Log.Debug("invoke authorized via delegation",
+				"caller", identity,
+				"effective_identity", effectiveIdentity,
+				"agent", req.AgentName,
+				"capability", req.FunctionName,
+			)
 		}
 	}
 

@@ -49,23 +49,30 @@ func main() {
 	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
 	flag.Parse()
 
-	fmt.Println("=== Modularis SU CLI ===")
+	fmt.Println("=== Modularis CLI ===")
 	fmt.Printf("Server: %s\n\n", *server)
 
-	// --- Claim SU token ---
+	// --- Try to claim SU token ---
 	suToken, err := claimSUToken(*server)
+	var isSU bool
 	if err != nil {
-		fmt.Printf("ERROR: failed to claim SU token: %v\n", err)
-		fmt.Println("Is the orchestrator running? (go run ./cmd/orchestrator)")
-		os.Exit(1)
+		fmt.Printf("Note: Could not claim SU token (%v)\n", err)
+		fmt.Println("Running as regular client. Some operations will be unavailable.")
+		fmt.Println("To get SU access, restart the orchestrator or use an existing SU token.")
+		fmt.Println()
+		isSU = false
+	} else {
+		fmt.Println("SU TOKEN (save this for admin use):")
+		fmt.Println(suToken)
+		fmt.Println()
+		isSU = true
 	}
-	fmt.Println("SU TOKEN (save this for admin use):")
-	fmt.Println(suToken)
-	fmt.Println()
 
-	// --- Build client with SU token ---
+	// --- Build client ---
 	c := client.New(*server)
-	c.SetToken(suToken)
+	if isSU && suToken != "" {
+		c.SetToken(suToken)
+	}
 
 	// --- Menu loop ---
 	scanner := bufio.NewScanner(os.Stdin)
@@ -74,12 +81,18 @@ func main() {
 		fmt.Println("1) List capabilities (names only)")
 		fmt.Println("2) Get capability schema (JSON)")
 		fmt.Println("3) Invoke capability (agent + cap + json file)")
-		fmt.Println("4) Grant policy for all current capabilities (SU)")
-		fmt.Println("5) List roles")
-		fmt.Println("6) List policies")
-		fmt.Println("7) Create role (interactive)")
-		fmt.Println("8) Create policy (interactive)")
-		fmt.Println("9) Exit")
+		if isSU {
+			fmt.Println("4) Grant policy for all current capabilities (SU)")
+			fmt.Println("5) List roles (SU)")
+			fmt.Println("6) List policies (SU)")
+			fmt.Println("7) Create role (SU)")
+			fmt.Println("8) Create policy (SU)")
+			fmt.Println("9) List tokens (SU)")
+			fmt.Println("10) Create delegation grant (SU)")
+			fmt.Println("11) List grants (SU)")
+			fmt.Println("12) Revoke grant (SU)")
+		}
+		fmt.Println("13) Exit")
 		fmt.Print("> ")
 
 		if !scanner.Scan() {
@@ -95,16 +108,60 @@ func main() {
 		case "3":
 			doInvoke(c, *server, scanner)
 		case "4":
-			doGrantPolicyForAll(c, *server, suToken, scanner)
+			if isSU {
+				doGrantPolicyForAll(c, *server, suToken, scanner)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
 		case "5":
-			doListRoles(*server, suToken)
+			if isSU {
+				doListRoles(*server, suToken)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
 		case "6":
-			doListPolicies(*server, suToken)
+			if isSU {
+				doListPolicies(*server, suToken)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
 		case "7":
-			doCreateRole(*server, suToken, scanner)
+			if isSU {
+				doCreateRole(*server, suToken, scanner)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
 		case "8":
-			doCreatePolicy(*server, suToken, scanner)
+			if isSU {
+				doCreatePolicy(*server, suToken, scanner)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
 		case "9":
+			if isSU {
+				doListTokens(c)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
+		case "10":
+			if isSU {
+				doCreateGrant(c, scanner)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
+		case "11":
+			if isSU {
+				doListGrants(c)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
+		case "12":
+			if isSU {
+				doRevokeGrant(c, scanner)
+			} else {
+				fmt.Println("This operation requires SU privileges.")
+			}
+		case "13":
 			fmt.Println("Bye.")
 			return
 		default:
@@ -565,4 +622,283 @@ func doInvoke(c *client.Client, server string, scanner *bufio.Scanner) {
 		return
 	}
 	fmt.Println("(timed out waiting for result)")
+}
+
+// --- Grant management functions ---
+
+func doCreateGrant(c *client.Client, scanner *bufio.Scanner) {
+	fmt.Println("=== Create Delegation Grant ===")
+	fmt.Println("This allows a delegatee identity to act on behalf of a delegator for specific capabilities.")
+	fmt.Println()
+
+	// Fetch available tokens
+	tokensResp, err := c.ListTokens()
+	if err != nil {
+		fmt.Printf("Warning: Could not fetch tokens: %v\n", err)
+		fmt.Println("You will need to paste tokens manually.")
+		fmt.Println()
+	} else if len(tokensResp.Tokens) > 0 {
+		fmt.Println("Available tokens:")
+		for i, t := range tokensResp.Tokens {
+			tokenPreview := t.Token
+			if len(tokenPreview) > 40 {
+				tokenPreview = tokenPreview[:40] + "..."
+			}
+			suMark := ""
+			if t.IsSU {
+				suMark = " [SU]"
+			}
+			fmt.Printf("  [%d] %s%s (created: %d)\n", i, tokenPreview, suMark, t.CreatedAt)
+		}
+		fmt.Println()
+	}
+
+	// Delegator
+	fmt.Print("Delegator identity (who has permission) [press Enter for SU token")
+	if len(tokensResp.Tokens) > 0 {
+		fmt.Print(" or enter index")
+	}
+	fmt.Print("]> ")
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	var delegator string
+
+	if input == "" {
+		// Default to SU token
+		delegator = c.Token()
+	} else if idx, err := strconv.Atoi(input); err == nil && idx >= 0 && idx < len(tokensResp.Tokens) {
+		// User selected by index
+		delegator = tokensResp.Tokens[idx].Token
+		fmt.Printf("Selected token: %s...\n", delegator[:min(40, len(delegator))])
+	} else {
+		// User pasted a token
+		delegator = input
+	}
+
+	// Delegatee
+	fmt.Print("Delegatee identity (who will act on behalf of delegator)")
+	if len(tokensResp.Tokens) > 0 {
+		fmt.Print(" [enter index or paste token]")
+	}
+	fmt.Print("> ")
+	if !scanner.Scan() {
+		return
+	}
+	input = strings.TrimSpace(scanner.Text())
+	var delegatee string
+
+	if input == "" {
+		fmt.Println("Delegatee is required.")
+		return
+	}
+
+	if idx, err := strconv.Atoi(input); err == nil && idx >= 0 && idx < len(tokensResp.Tokens) {
+		// User selected by index
+		delegatee = tokensResp.Tokens[idx].Token
+		fmt.Printf("Selected token: %s...\n", delegatee[:min(40, len(delegatee))])
+	} else {
+		delegatee = input
+	}
+
+	// Target agent
+	fmt.Print("Target agent name (or '*' for any)> ")
+	if !scanner.Scan() {
+		return
+	}
+	targetAgent := strings.TrimSpace(scanner.Text())
+	if targetAgent == "" {
+		targetAgent = "*"
+	}
+
+	// Target capability
+	fmt.Print("Target capability name (or '*' for any)> ")
+	if !scanner.Scan() {
+		return
+	}
+	targetCapability := strings.TrimSpace(scanner.Text())
+	if targetCapability == "" {
+		targetCapability = "*"
+	}
+
+	// Optional expiry
+	var expiresAt int64
+	fmt.Print("Expiry Unix timestamp (0 for no expiry) [0]> ")
+	if !scanner.Scan() {
+		return
+	}
+	expStr := strings.TrimSpace(scanner.Text())
+	if expStr != "" {
+		exp, err := strconv.ParseInt(expStr, 10, 64)
+		if err != nil {
+			fmt.Printf("Invalid timestamp: %v\n", err)
+			return
+		}
+		expiresAt = exp
+	}
+
+	// Confirm
+	fmt.Printf("\nGrant details:\n")
+	fmt.Printf("  Delegator:        %s\n", delegator[:min(40, len(delegator))]+"...")
+	fmt.Printf("  Delegatee:        %s\n", delegatee[:min(40, len(delegatee))]+"...")
+	fmt.Printf("  Target Agent:     %s\n", targetAgent)
+	fmt.Printf("  Target Capability: %s\n", targetCapability)
+	if expiresAt > 0 {
+		fmt.Printf("  Expires:          %d\n", expiresAt)
+	} else {
+		fmt.Println("  Expires:          never")
+	}
+	fmt.Print("\nCreate grant? (yes/no)> ")
+	if !scanner.Scan() {
+		return
+	}
+	if strings.TrimSpace(scanner.Text()) != "yes" {
+		fmt.Println("Cancelled.")
+		return
+	}
+
+	// Create grant
+	req := client.CreateGrantRequest{
+		Delegator:        delegator,
+		Delegatee:        delegatee,
+		TargetAgent:      targetAgent,
+		TargetCapability: targetCapability,
+		ExpiresAt:        expiresAt,
+	}
+
+	resp, err := c.CreateGrant(req)
+	if err != nil {
+		fmt.Printf("Failed to create grant: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\nGrant created successfully!\n")
+	fmt.Printf("  Created at: %d\n", resp.Grant.CreatedAt)
+}
+
+func doListGrants(c *client.Client) {
+	resp, err := c.ListGrants()
+	if err != nil {
+		fmt.Printf("Error listing grants: %v\n", err)
+		return
+	}
+
+	if len(resp.Grants) == 0 {
+		fmt.Println("No grants found.")
+		return
+	}
+
+	fmt.Printf("%d grant(s):\n", len(resp.Grants))
+	for i, g := range resp.Grants {
+		fmt.Printf("\n[%d] Grant:\n", i)
+		fmt.Printf("  Delegator:         %s...\n", g.Delegator[:min(40, len(g.Delegator))])
+		fmt.Printf("  Delegatee:         %s...\n", g.Delegatee[:min(40, len(g.Delegatee))])
+		fmt.Printf("  Target Agent:      %s\n", g.TargetAgent)
+		fmt.Printf("  Target Capability: %s\n", g.TargetCapability)
+		if g.ExpiresAt > 0 {
+			fmt.Printf("  Expires:           %d\n", g.ExpiresAt)
+		}
+		fmt.Printf("  Created:           %d\n", g.CreatedAt)
+	}
+}
+
+func doRevokeGrant(c *client.Client, scanner *bufio.Scanner) {
+	// First list grants for reference
+	resp, err := c.ListGrants()
+	if err != nil {
+		fmt.Printf("Error listing grants: %v\n", err)
+		return
+	}
+
+	if len(resp.Grants) == 0 {
+		fmt.Println("No grants to revoke.")
+		return
+	}
+
+	fmt.Println("Current grants:")
+	for i, g := range resp.Grants {
+		fmt.Printf("  [%d] %s -> %s (agent=%s, cap=%s)\n",
+			i,
+			g.Delegator[:min(20, len(g.Delegator))]+"...",
+			g.Delegatee[:min(20, len(g.Delegatee))]+"...",
+			g.TargetAgent,
+			g.TargetCapability)
+	}
+
+	fmt.Print("\nSelect grant to revoke by index> ")
+	if !scanner.Scan() {
+		return
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
+	if err != nil || idx < 0 || idx >= len(resp.Grants) {
+		fmt.Println("Invalid index.")
+		return
+	}
+
+	g := resp.Grants[idx]
+	fmt.Printf("\nRevoking grant:\n")
+	fmt.Printf("  Delegator:         %s...\n", g.Delegator[:min(40, len(g.Delegator))])
+	fmt.Printf("  Delegatee:         %s...\n", g.Delegatee[:min(40, len(g.Delegatee))])
+	fmt.Printf("  Target Agent:      %s\n", g.TargetAgent)
+	fmt.Printf("  Target Capability: %s\n", g.TargetCapability)
+	fmt.Print("\nConfirm revoke? (yes/no)> ")
+	if !scanner.Scan() {
+		return
+	}
+	if strings.TrimSpace(scanner.Text()) != "yes" {
+		fmt.Println("Cancelled.")
+		return
+	}
+
+	req := client.RevokeGrantRequest{
+		Delegator:        g.Delegator,
+		Delegatee:        g.Delegatee,
+		TargetAgent:      g.TargetAgent,
+		TargetCapability: g.TargetCapability,
+	}
+
+	if err := c.RevokeGrant(req); err != nil {
+		fmt.Printf("Failed to revoke grant: %v\n", err)
+		return
+	}
+
+	fmt.Println("Grant revoked successfully!")
+}
+
+func doListTokens(c *client.Client) {
+	resp, err := c.ListTokens()
+	if err != nil {
+		fmt.Printf("Error listing tokens: %v\n", err)
+		return
+	}
+
+	if len(resp.Tokens) == 0 {
+		fmt.Println("No tokens found.")
+		return
+	}
+
+	fmt.Printf("%d token(s):\n", len(resp.Tokens))
+	for i, t := range resp.Tokens {
+		tokenPreview := t.Token
+		if len(tokenPreview) > 50 {
+			tokenPreview = tokenPreview[:50] + "..."
+		}
+		suMark := ""
+		if t.IsSU {
+			suMark = " [SU]"
+		}
+		createdAt := ""
+		if t.CreatedAt > 0 {
+			createdAt = fmt.Sprintf(" (created: %d)", t.CreatedAt)
+		}
+		fmt.Printf("  [%d] %s%s%s\n", i, tokenPreview, suMark, createdAt)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

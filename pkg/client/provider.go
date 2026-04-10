@@ -208,3 +208,194 @@ func (c *Client) GetInvokeResult(invocationID string) (InvokeResult, error) {
 	}
 	return ir, nil
 }
+
+// Grant represents a capability delegation grant.
+type Grant struct {
+	Delegator        string `json:"delegator"`
+	Delegatee        string `json:"delegatee"`
+	TargetAgent      string `json:"target_agent"`
+	TargetCapability string `json:"target_capability"`
+	ExpiresAt        int64  `json:"expires_at,omitempty"`
+	CreatedAt        int64  `json:"created_at"`
+}
+
+// CreateGrantRequest is the request body for creating a grant.
+type CreateGrantRequest struct {
+	Delegator        string `json:"delegator"`
+	Delegatee        string `json:"delegatee"`
+	TargetAgent      string `json:"target_agent"`
+	TargetCapability string `json:"target_capability"`
+	ExpiresAt        int64  `json:"expires_at,omitempty"`
+}
+
+// CreateGrantResponse is the response from creating a grant.
+type CreateGrantResponse struct {
+	OK    bool  `json:"ok"`
+	Grant Grant `json:"grant"`
+}
+
+// CreateGrant creates a delegation grant allowing a delegatee to act on behalf
+// of a delegator for specific capabilities. Requires SU token.
+func (c *Client) CreateGrant(req CreateGrantRequest) (CreateGrantResponse, error) {
+	url := c.serverAddress + "/grant"
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return CreateGrantResponse{}, fmt.Errorf("failed to marshal grant request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return CreateGrantResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return CreateGrantResponse{}, ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CreateGrantResponse{}, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		return CreateGrantResponse{}, fmt.Errorf("grant creation failed with status %s: %s", resp.Status, string(body))
+	}
+
+	var gr CreateGrantResponse
+	if err := json.Unmarshal(body, &gr); err != nil {
+		return CreateGrantResponse{}, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return gr, nil
+}
+
+// ListGrantsResponse is the response from listing grants.
+type ListGrantsResponse struct {
+	Grants []Grant `json:"grants"`
+}
+
+// ListGrants lists all grants in the system. Requires SU token.
+func (c *Client) ListGrants() (ListGrantsResponse, error) {
+	url := c.serverAddress + "/grants"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return ListGrantsResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ListGrantsResponse{}, ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ListGrantsResponse{}, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return ListGrantsResponse{}, fmt.Errorf("list grants failed with status %s: %s", resp.Status, string(body))
+	}
+
+	var lr ListGrantsResponse
+	if err := json.Unmarshal(body, &lr); err != nil {
+		return ListGrantsResponse{}, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return lr, nil
+}
+
+// RevokeGrantRequest is the request body for revoking a grant.
+type RevokeGrantRequest struct {
+	Delegator        string `json:"delegator"`
+	Delegatee        string `json:"delegatee"`
+	TargetAgent      string `json:"target_agent"`
+	TargetCapability string `json:"target_capability"`
+}
+
+// RevokeGrant revokes a specific grant. Requires SU token.
+func (c *Client) RevokeGrant(req RevokeGrantRequest) error {
+	url := c.serverAddress + "/grant"
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal revoke request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("DELETE", url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("revoke grant failed with status %s: %s", resp.Status, string(body))
+	}
+
+	return nil
+}
+
+// TokenInfo represents information about a generated token.
+type TokenInfo struct {
+	Token     string `json:"token"`
+	CreatedAt int64  `json:"created_at"`
+	IsSU      bool   `json:"is_su"`
+}
+
+// ListTokensResponse is the response from listing tokens.
+type ListTokensResponse struct {
+	Tokens []TokenInfo `json:"tokens"`
+}
+
+// ListTokens lists all generated tokens. Requires SU token.
+func (c *Client) ListTokens() (ListTokensResponse, error) {
+	url := c.serverAddress + "/tokens"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return ListTokensResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ListTokensResponse{}, ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ListTokensResponse{}, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return ListTokensResponse{}, fmt.Errorf("list tokens failed with status %s: %s", resp.Status, string(body))
+	}
+
+	var lr ListTokensResponse
+	if err := json.Unmarshal(body, &lr); err != nil {
+		return ListTokensResponse{}, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return lr, nil
+}

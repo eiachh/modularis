@@ -102,3 +102,69 @@ func (h *PolicyHandler) HandleListPolicies(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"policies": h.Store.ListPolicies()})
 }
+
+// HandleCreateGrant handles POST /grant (SU only).
+// Creates a delegation grant allowing a delegatee to act on behalf of a delegator
+// for specific capabilities.
+func (h *PolicyHandler) HandleCreateGrant(c *gin.Context) {
+	if !h.requireSU(c) {
+		return
+	}
+	var g policy.Grant
+	if err := c.ShouldBindJSON(&g); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if g.Delegator == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "delegator required"})
+		return
+	}
+	if g.Delegatee == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "delegatee required"})
+		return
+	}
+	if g.TargetAgent == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target_agent required"})
+		return
+	}
+	if g.TargetCapability == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target_capability required"})
+		return
+	}
+
+	created := h.Store.AddGrant(g)
+	c.JSON(http.StatusCreated, gin.H{"ok": true, "grant": created})
+}
+
+// HandleListGrants handles GET /grants (SU only).
+// Lists all grants in the system.
+func (h *PolicyHandler) HandleListGrants(c *gin.Context) {
+	if !h.requireSU(c) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"grants": h.Store.ListGrants()})
+}
+
+// HandleRevokeGrant handles DELETE /grant (SU only).
+// Revokes a specific grant.
+func (h *PolicyHandler) HandleRevokeGrant(c *gin.Context) {
+	if !h.requireSU(c) {
+		return
+	}
+	var req struct {
+		Delegator        string `json:"delegator" binding:"required"`
+		Delegatee        string `json:"delegatee" binding:"required"`
+		TargetAgent      string `json:"target_agent" binding:"required"`
+		TargetCapability string `json:"target_capability" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if h.Store.RevokeGrant(req.Delegator, req.Delegatee, req.TargetAgent, req.TargetCapability) {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "message": "grant revoked"})
+	} else {
+		c.JSON(http.StatusNotFound, gin.H{"error": "grant not found"})
+	}
+}
