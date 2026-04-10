@@ -12,6 +12,37 @@ func (s *Store) Authorize(identity, serviceID, capability string) bool {
 	return eff == EffectAllow
 }
 
+// AuthorizeWithDelegation checks if the given identity can invoke (serviceID, capability).
+// If the identity has no direct permission, it checks for grants that allow
+// the identity to act on behalf of another (delegator).
+// Returns (allowed, effectiveIdentity) where effectiveIdentity is either
+// the original identity or the delegator's identity if acting via grant.
+func (s *Store) AuthorizeWithDelegation(identity, serviceID, capability string) (bool, string) {
+	// First, try direct authorization
+	if s.Authorize(identity, serviceID, capability) {
+		return true, identity
+	}
+
+	// Check for grants where this identity is the delegatee
+	grants := s.GetGrants(identity)
+	for _, g := range grants {
+		// Check if grant matches the target
+		if g.TargetAgent != serviceID && g.TargetAgent != "*" {
+			continue
+		}
+		if g.TargetCapability != capability && g.TargetCapability != "*" {
+			continue
+		}
+
+		// Grant matches - check if delegator has permission
+		if s.Authorize(g.Delegator, serviceID, capability) {
+			return true, g.Delegator
+		}
+	}
+
+	return false, ""
+}
+
 // collectRules gathers all rules applicable to a policy:
 // 1. Rules from each role in p.Roles
 // 2. Rules directly in p.Rules

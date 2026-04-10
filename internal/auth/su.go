@@ -17,6 +17,13 @@ type SUTokenClaims struct {
 	ISS  string `json:"iss"`  // issuer
 }
 
+// TokenInfo represents information about a generated token.
+type TokenInfo struct {
+	Token     string `json:"token"`
+	CreatedAt int64  `json:"created_at"`
+	IsSU      bool   `json:"is_su"`
+}
+
 // SUManager manages Ed25519 keys and the one-time SU token.
 type SUManager struct {
 	privKey ed25519.PrivateKey
@@ -25,6 +32,10 @@ type SUManager struct {
 	suToken string
 	once    sync.Once
 	mu      sync.RWMutex
+
+	// Track all generated tokens (non-SU)
+	tokens    []TokenInfo
+	tokensMu  sync.RWMutex
 }
 
 // NewSUManager creates a new SUManager with a freshly generated Ed25519 key pair.
@@ -37,6 +48,7 @@ func NewSUManager() *SUManager {
 	return &SUManager{
 		privKey: priv,
 		pubKey:  pub,
+		tokens:  make([]TokenInfo, 0),
 	}
 }
 
@@ -132,12 +144,49 @@ func (m *SUManager) IsSUToken(token string) bool {
 // GenerateDefaultToken creates a signed default/guest token.
 // The token is opaque — identity is the token string itself, not parsed from claims.
 // Use this for clients that request a token without providing one.
+// The token is tracked and can be listed via ListTokens.
 func (m *SUManager) GenerateDefaultToken() (string, error) {
 	// Minimal payload — orchestrator never parses this for identity.
 	// Identity is the token string.
 	payload := []byte(`{"role":"guest","iss":"orchestrator"}`)
 	sig := ed25519.Sign(m.privKey, payload)
-	return encodeToken(payload, sig), nil
+	token := encodeToken(payload, sig)
+
+	// Track the generated token
+	m.tokensMu.Lock()
+	m.tokens = append(m.tokens, TokenInfo{
+		Token:     token,
+		CreatedAt: time.Now().UTC().Unix(),
+		IsSU:      false,
+	})
+	m.tokensMu.Unlock()
+
+	return token, nil
+}
+
+// ListTokens returns all generated tokens (non-SU only).
+// Returns a copy to avoid race conditions.
+func (m *SUManager) ListTokens() []TokenInfo {
+	m.tokensMu.RLock()
+	defer m.tokensMu.RUnlock()
+	result := make([]TokenInfo, len(m.tokens))
+	copy(result, m.tokens)
+	return result
+}
+
+// GetSUTokenInfo returns the SU token as a TokenInfo if it has been generated.
+// Returns nil if the SU token hasn't been generated yet.
+func (m *SUManager) GetSUTokenInfo() *TokenInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.suToken == "" {
+		return nil
+	}
+	return &TokenInfo{
+		Token:     m.suToken,
+		CreatedAt: 0, // SU token doesn't track creation time
+		IsSU:      true,
+	}
 }
 
 // payloadPart extracts the base64url payload portion (before first dot) as raw bytes.

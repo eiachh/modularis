@@ -106,12 +106,20 @@ func main() {
 	// Default token endpoint: clients request an opaque token (no permissions by default)
 	router.POST("/token", authHandler.HandleGenerateDefaultToken)
 
+	// Token listing endpoint (SU only) - for grant management
+	router.GET("/tokens", authHandler.HandleListTokens)
+
 	// Policy admin endpoints (SU-only via Authorization: Bearer <SU token>)
 	router.POST("/policy/role", policyHandler.HandleCreateRole)
 	router.POST("/policy", policyHandler.HandleCreatePolicy)
 	router.GET("/policy/roles", policyHandler.HandleListRoles)
 	router.GET("/policy/:identity", policyHandler.HandleGetPolicy)
 	router.GET("/policies", policyHandler.HandleListPolicies)
+
+	// Grant endpoints for capability delegation (SU-only)
+	router.POST("/grant", policyHandler.HandleCreateGrant)
+	router.GET("/grants", policyHandler.HandleListGrants)
+	router.DELETE("/grant", policyHandler.HandleRevokeGrant)
 
 	addr := envOr("LISTEN_ADDR", ":8080")
 	srv := &http.Server{
