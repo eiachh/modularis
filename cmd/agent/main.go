@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/eiachh/Modularis/internal/domain"
+	"github.com/eiachh/Modularis/pkg/config"
 )
 
 // mustMarshal panics on marshal error (for static/safe data).
@@ -41,7 +42,7 @@ func sendAck(conn *websocket.Conn, capabilityID string, log *slog.Logger) {
 
 func main() {
 	name := flag.String("name", "", "agent name (required)")
-	server := flag.String("server", "ws://localhost:18080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator WebSocket URL (default: from MODULARIS_SERVER or ws://localhost:8080)")
 	flag.Parse()
 
 	if *name == "" {
@@ -50,9 +51,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	serverURL := config.OrDefault(*server, config.GetWebSocketURL())
+
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	connectURL := *server + "/connect"
+	connectURL := serverURL + "/connect"
 	log.Info("connecting to orchestrator", "url", connectURL)
 
 	conn, _, err := websocket.DefaultDialer.Dial(connectURL, nil)

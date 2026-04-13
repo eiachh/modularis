@@ -8,13 +8,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eiachh/Modularis/pkg/config"
 	"github.com/eiachh/Modularis/pkg/display"
 )
 
 func main() {
 	name := flag.String("name", "", "display name (required)")
 	displayType := flag.String("type", "terminal", "display type (terminal, web, led, discord, ...)")
-	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (default: from MODULARIS_SERVER or http://localhost:8080)")
 	flag.Parse()
 
 	if *name == "" {
@@ -23,7 +24,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	d := display.New(*server, *name, *displayType, 30*time.Second)
+	serverURL := config.OrDefault(*server, config.GetServerURL())
+
+	d := display.New(serverURL, *name, *displayType, 30*time.Second)
 
 	fmt.Printf("Connecting display %q to orchestrator...\n", *name)
 	id, messages, closed, err := d.Connect()

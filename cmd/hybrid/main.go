@@ -12,15 +12,18 @@ import (
 
 	"github.com/eiachh/Modularis/pkg/agent"
 	"github.com/eiachh/Modularis/pkg/client"
+	"github.com/eiachh/Modularis/pkg/config"
 )
 
 func main() {
-	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (default: from MODULARIS_SERVER or http://localhost:8080)")
 	agentName := flag.String("agent", "hybrid-agent", "agent name for registration")
 	flag.Parse()
 
+	serverURL := config.OrDefault(*server, config.GetServerURL())
+
 	// 1. Setup and Connect Agent
-	invocations, closed := setupAgent(*server, *agentName)
+	invocations, closed := setupAgent(serverURL, *agentName)
 
 	// 2. Handle Invocations in Background
 	go handleEvents(invocations, closed)
@@ -29,7 +32,7 @@ func main() {
 	time.Sleep(100 * time.Millisecond)
 
 	// 3. Setup Client
-	c := client.New(*server)
+	c := client.New(serverURL)
 
 	// 4. Interactive Loop
 	runInteractiveLoop(c)

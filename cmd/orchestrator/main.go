@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,9 +19,13 @@ import (
 	"github.com/eiachh/Modularis/internal/registry"
 	"github.com/eiachh/Modularis/internal/service"
 	"github.com/eiachh/Modularis/internal/ws"
+	"github.com/eiachh/Modularis/pkg/config"
 )
 
 func main() {
+	listenAddr := flag.String("listen", "", "listen address (default: from MODULARIS_PORT or :8080)")
+	flag.Parse()
+
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	agentRegistry := registry.New()
@@ -121,7 +126,7 @@ func main() {
 	router.GET("/grants", policyHandler.HandleListGrants)
 	router.DELETE("/grant", policyHandler.HandleRevokeGrant)
 
-	addr := envOr("LISTEN_ADDR", ":8080")
+	addr := config.OrDefault(*listenAddr, config.GetListenAddr())
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: router,
@@ -144,11 +149,4 @@ func main() {
 	if err := srv.Shutdown(context.Background()); err != nil {
 		log.Error("shutdown error", "error", err)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

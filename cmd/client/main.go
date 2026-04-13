@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eiachh/Modularis/pkg/client"
+	"github.com/eiachh/Modularis/pkg/config"
 )
 
 // Policy Engine Demo
@@ -20,16 +21,29 @@ import (
 //   3. SU grants:      (see examples/policy-demo.sh)
 //   4. Retry invoke:   should succeed now
 //
-// Without -token, calls will fail with 401 (missing token required by orchestrator).
+// Without -token, it auto-fetches a token from the orchestrator.
 
 func main() {
-	server := flag.String("server", "http://localhost:8080", "orchestrator address")
+	server := flag.String("server", "", "orchestrator address (default: from MODULARIS_SERVER or http://localhost:8080)")
 	agent := flag.String("agent", "myagent", "agent name")
-	token := flag.String("token", "", "bearer token for Authorization header (for policy-protected calls)")
+	token := flag.String("token", "", "bearer token for Authorization header (auto-fetched if not provided)")
 	flag.Parse()
 
-	c := client.New(*server)
-	if *token != "" {
+	serverURL := config.OrDefault(*server, config.GetServerURL())
+
+	c := client.New(serverURL)
+
+	// Auto-fetch token if not provided
+	if *token == "" {
+		autoToken, err := config.FetchToken(serverURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Could not auto-fetch token: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Running without token - some operations may fail.")
+		} else {
+			c.SetToken(autoToken)
+			fmt.Printf("Auto-fetched token: %s...\n", autoToken[:min(20, len(autoToken))])
+		}
+	} else {
 		c.SetToken(*token)
 	}
 
@@ -94,6 +108,13 @@ func mustJSON(v any) json.RawMessage {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "marshal error: %v\n", err)
 		os.Exit(1)
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
 	return b
 }

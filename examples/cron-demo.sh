@@ -146,3 +146,11 @@ echo "  2. SU created a grant: SU -> cron-service for echo-agent/echoRespond"
 echo "  3. Client asked cron-service to call echo-agent after 3 seconds"
 echo "  4. Cron-service (with no direct permissions) used the grant"
 echo "  5. Cron-service invoked echo-agent on SU's behalf"
+echo
+echo "=== Alternative: Using the CLI ==="
+echo
+echo "You can also run this demo using the interactive CLI:"
+echo "  go run ./cmd/cli"
+echo
+echo "See examples/CRON_DEMO_GUIDE.md for step-by-step CLI instructions."
+echo "Use data/deferred-call.json as the args file when invoking deferredCall."
