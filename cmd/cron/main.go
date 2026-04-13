@@ -15,6 +15,7 @@ import (
 
 	"github.com/eiachh/Modularis/internal/domain"
 	"github.com/eiachh/Modularis/pkg/client"
+	"github.com/eiachh/Modularis/pkg/config"
 )
 
 // DeferredCallArgs represents the arguments for the deferredCall capability.
@@ -41,26 +42,41 @@ type CronService struct {
 
 func main() {
 	name := flag.String("name", "cron-service", "agent name")
-	server := flag.String("server", "ws://localhost:8080", "orchestrator WebSocket URL")
-	httpServer := flag.String("http-server", "http://localhost:8080", "orchestrator HTTP URL")
-	token := flag.String("token", "", "bearer token for authorization (optional)")
+	server := flag.String("server", "", "orchestrator WebSocket URL (default: from MODULARIS_SERVER or ws://localhost:8080)")
+	httpServer := flag.String("http-server", "", "orchestrator HTTP URL (default: from MODULARIS_SERVER or http://localhost:8080)")
+	token := flag.String("token", "", "bearer token for authorization (auto-fetched if not provided)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	wsURL := config.OrDefault(*server, config.GetWebSocketURL())
+	httpURL := config.OrDefault(*httpServer, config.GetServerURL())
+
+	// Auto-fetch token if not provided
+	var autoToken string
+	if *token == "" {
+		var err error
+		autoToken, err = config.FetchToken(httpURL)
+		if err != nil {
+			log.Error("failed to auto-fetch token", "error", err)
+			os.Exit(1)
+		}
+		log.Info("auto-fetched token", "token_preview", autoToken[:min(20, len(autoToken))])
+	} else {
+		autoToken = *token
+	}
+
 	// Create the cron service
 	svc := &CronService{
 		name:   *name,
-		client: client.New(*httpServer),
+		client: client.New(httpURL),
 		log:    log,
-		token:  *token,
+		token:  autoToken,
 	}
-	if *token != "" {
-		svc.client.SetToken(*token)
-	}
+	svc.client.SetToken(autoToken)
 
 	// Connect as an agent
-	connectURL := *server + "/connect"
+	connectURL := wsURL + "/connect"
 	log.Info("connecting to orchestrator", "url", connectURL)
 
 	conn, _, err := websocket.DefaultDialer.Dial(connectURL, nil)
@@ -343,4 +359,11 @@ func (s *CronService) broadcastDisplay(title, body, level string) {
 	}); err != nil {
 		s.log.Error("failed to broadcast display", "error", err)
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

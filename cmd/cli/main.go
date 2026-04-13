@@ -14,12 +14,8 @@ import (
 	"time"
 
 	"github.com/eiachh/Modularis/pkg/client"
+	"github.com/eiachh/Modularis/pkg/config"
 )
-
-// suTokenResponse is the response from POST /su/token
-type suTokenResponse struct {
-	Token string `json:"token"`
-}
 
 // policyResponse is a generic policy endpoint response
 type policyResponse struct {
@@ -46,14 +42,16 @@ type policyPolicy struct {
 }
 
 func main() {
-	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (default: from MODULARIS_SERVER or http://localhost:8080)")
 	flag.Parse()
 
+	serverURL := config.OrDefault(*server, config.GetServerURL())
+
 	fmt.Println("=== Modularis CLI ===")
-	fmt.Printf("Server: %s\n\n", *server)
+	fmt.Printf("Server: %s\n\n", serverURL)
 
 	// --- Try to claim SU token ---
-	suToken, err := claimSUToken(*server)
+	suToken, err := config.FetchSUToken(serverURL)
 	var isSU bool
 	if err != nil {
 		fmt.Printf("Note: Could not claim SU token (%v)\n", err)
@@ -69,7 +67,7 @@ func main() {
 	}
 
 	// --- Build client ---
-	c := client.New(*server)
+	c := client.New(serverURL)
 	if isSU && suToken != "" {
 		c.SetToken(suToken)
 	}
@@ -106,34 +104,34 @@ func main() {
 		case "2":
 			doGetSchema(c, scanner)
 		case "3":
-			doInvoke(c, *server, scanner)
+			doInvoke(c, serverURL, scanner)
 		case "4":
 			if isSU {
-				doGrantPolicyForAll(c, *server, suToken, scanner)
+				doGrantPolicyForAll(c, serverURL, suToken, scanner)
 			} else {
 				fmt.Println("This operation requires SU privileges.")
 			}
 		case "5":
 			if isSU {
-				doListRoles(*server, suToken)
+				doListRoles(serverURL, suToken)
 			} else {
 				fmt.Println("This operation requires SU privileges.")
 			}
 		case "6":
 			if isSU {
-				doListPolicies(*server, suToken)
+				doListPolicies(serverURL, suToken)
 			} else {
 				fmt.Println("This operation requires SU privileges.")
 			}
 		case "7":
 			if isSU {
-				doCreateRole(*server, suToken, scanner)
+				doCreateRole(serverURL, suToken, scanner)
 			} else {
 				fmt.Println("This operation requires SU privileges.")
 			}
 		case "8":
 			if isSU {
-				doCreatePolicy(*server, suToken, scanner)
+				doCreatePolicy(serverURL, suToken, scanner)
 			} else {
 				fmt.Println("This operation requires SU privileges.")
 			}
@@ -169,34 +167,6 @@ func main() {
 		}
 		fmt.Println()
 	}
-}
-
-func claimSUToken(server string) (string, error) {
-	url := server + "/su/token"
-	resp, err := http.Post(url, "application/json", nil)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusConflict {
-		// Token already exists — try to re-fetch? Actually the API returns 409 with no token.
-		// For simplicity, we just error. User can restart orchestrator or we could expose GET.
-		return "", fmt.Errorf("SU token already claimed (409). Restart orchestrator to reset.")
-	}
-	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("unexpected status %s: %s", resp.Status, string(body))
-	}
-
-	var tr suTokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", fmt.Errorf("bad response: %w", err)
-	}
-	if tr.Token == "" {
-		return "", fmt.Errorf("empty token in response")
-	}
-	return tr.Token, nil
 }
 
 func grantPolicyForAll(server, suToken string, caps []client.Capability) error {

@@ -1,0 +1,6 @@
+{
+  "target_agent": "echo-agent",
+  "target_capability": "echoNoReturn",
+  "target_args": {"message": "Hello from deferred call!"},
+  "delay_seconds": 3
+}
