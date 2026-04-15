@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 )
 
 // ErrConnNotReady is returned when the orchestrator connection is not available.
 var ErrConnNotReady = errors.New("orchestrator connection is not available")
+
+const defaultOrchestratorURL = "http://localhost:8080"
 
 // Capability represents a single capability returned by the server.
 // It contains the agent name, function name, and the JSON schema for the
@@ -45,12 +48,27 @@ type Client struct {
 }
 
 // New creates a new Client instance configured with the given server address.
-// The serverAddress should be the base URL of the orchestrator (e.g., "http://localhost:8080").
+// If serverAddress is empty, it falls back to ORCHESTRATOR_URL env var or
+// "http://localhost:8080". If no MODULARIS_TOKEN env var is set, a default
+// token is automatically claimed from the orchestrator.
 func New(serverAddress string) *Client {
-	return &Client{
+	if serverAddress == "" {
+		if v := os.Getenv("ORCHESTRATOR_URL"); v != "" {
+			serverAddress = v
+		} else {
+			serverAddress = defaultOrchestratorURL
+		}
+	}
+	c := &Client{
 		serverAddress: serverAddress,
 		httpClient:    &http.Client{},
 	}
+	if token := os.Getenv("MODULARIS_TOKEN"); token != "" {
+		c.token = token
+	} else {
+		c.claimDefaultToken()
+	}
+	return c
 }
 
 // SetToken sets the bearer token for Authorization header on all requests.
@@ -366,6 +384,160 @@ type ListTokensResponse struct {
 	Tokens []TokenInfo `json:"tokens"`
 }
 
+// --- Policy types (now provided by the client for consistent server handling) ---
+
+// RoleRule defines a single allow/deny rule for a service (agent) + capability.
+type RoleRule struct {
+	ServiceID  string `json:"service_id"`
+	Capability string `json:"capability"`
+	Effect     string `json:"effect"`
+}
+
+// Role represents a named collection of rules.
+type Role struct {
+	Name  string     `json:"name"`
+	Rules []RoleRule `json:"rules"`
+}
+
+// Policy binds an identity (token) to roles and/or direct rules.
+type Policy struct {
+	Identity string     `json:"identity"`
+	Roles    []string   `json:"roles"`
+	Rules    []RoleRule `json:"rules"`
+}
+
+// CreateRole creates a new role (SU only).
+func (c *Client) CreateRole(role Role) error {
+	url := c.serverAddress + "/policy/role"
+
+	payload, err := json.Marshal(role)
+	if err != nil {
+		return fmt.Errorf("failed to marshal role: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("create role failed: %s", string(body))
+	}
+	return nil
+}
+
+// ListRoles returns all roles (SU only).
+func (c *Client) ListRoles() ([]Role, error) {
+	url := c.serverAddress + "/policy/roles"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list roles failed: %s", string(body))
+	}
+
+	var out struct {
+		Roles []Role `json:"roles"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("failed to decode roles: %w", err)
+	}
+	return out.Roles, nil
+}
+
+// CreatePolicy creates or updates a policy for an identity (SU only).
+func (c *Client) CreatePolicy(pol Policy) error {
+	url := c.serverAddress + "/policy"
+
+	payload, err := json.Marshal(pol)
+	if err != nil {
+		return fmt.Errorf("failed to marshal policy: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("create policy failed: %s", string(body))
+	}
+	return nil
+}
+
+// ListPolicies returns all policies (SU only).
+func (c *Client) ListPolicies() ([]Policy, error) {
+	url := c.serverAddress + "/policies"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, ErrConnNotReady
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list policies failed: %s", string(body))
+	}
+
+	var out struct {
+		Policies []Policy `json:"policies"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("failed to decode policies: %w", err)
+	}
+	return out.Policies, nil
+}
+
 // ListTokens lists all generated tokens. Requires SU token.
 func (c *Client) ListTokens() (ListTokensResponse, error) {
 	url := c.serverAddress + "/tokens"
@@ -398,4 +570,25 @@ func (c *Client) ListTokens() (ListTokensResponse, error) {
 		return ListTokensResponse{}, fmt.Errorf("failed to decode response: %w", err)
 	}
 	return lr, nil
+}
+
+// claimDefaultToken obtains a default token via POST /token and stores it.
+// Called automatically by New when no MODULARIS_TOKEN is provided.
+func (c *Client) claimDefaultToken() {
+	url := c.serverAddress + "/token"
+	resp, err := c.httpClient.Post(url, "application/json", nil)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	var tr struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err == nil && tr.Token != "" {
+		c.token = tr.Token
+	}
 }

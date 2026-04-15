@@ -11,7 +11,7 @@ import (
 	"github.com/eiachh/Modularis/internal/activitylog"
 	"github.com/eiachh/Modularis/internal/auth"
 	"github.com/eiachh/Modularis/internal/service"
-	"github.com/eiachh/Modularis/pkg"
+	client "github.com/eiachh/Modularis/pkg/client"
 )
 
 // CapabilitiesHandler serves capability discovery and invocation.
@@ -76,7 +76,7 @@ func (h *CapabilitiesHandler) HandleInvoke(c *gin.Context) {
 		return
 	}
 
-	var req pkg.InvokeCommand
+	var req client.InvokeCommand
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Log.Warn("invalid invoke request", "error", err)
 		c.JSON(http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})

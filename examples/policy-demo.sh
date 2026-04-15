@@ -79,8 +79,8 @@ echo
 
 # --- Step 6: Client tries again (should succeed now) ---
 echo ">>> Step 6: Client retries invoke echoRespond (should succeed)"
-HTTP_CODE=$( /tmp/invoke_resp2.txt -w "%{http_code}" -X POST "$BASE/invoke" \
-  -H "Authorization: Bearer curl -s -o$TOKEN" \
+HTTP_CODE=$(curl -s -o /tmp/invoke_resp2.txt -w "%{http_code}" -X POST "$BASE/invoke" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"agent_name":"echo-agent","function_name":"echoRespond","args":{"message":"hello from policy demo"}}')
 echo "HTTP status: $HTTP_CODE"
