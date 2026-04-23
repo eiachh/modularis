@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (ORCHESTRATOR_URL or default)")
 	agentName := flag.String("agent", "hybrid-agent", "agent name for registration")
 	flag.Parse()
 

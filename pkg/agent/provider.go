@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -41,10 +42,20 @@ type Agent struct {
 	handlers map[string]func(json.RawMessage) json.RawMessage
 }
 
+const defaultOrchestratorURL = "http://localhost:8080"
+
 // New creates a new Agent instance configured with the given orchestrator URL,
 // agent name, and maximum reconnection backoff.
 // Use AddCapability to register capabilities before calling Connect.
+// If orchestratorURL is empty, falls back to ORCHESTRATOR_URL env or default.
 func New(orchestratorURL, agentName string, maxBackoff time.Duration) *Agent {
+	if orchestratorURL == "" {
+		if v := os.Getenv("ORCHESTRATOR_URL"); v != "" {
+			orchestratorURL = v
+		} else {
+			orchestratorURL = defaultOrchestratorURL
+		}
+	}
 	return &Agent{
 		orchestratorURL: orchestratorURL,
 		agentName:       agentName,
@@ -289,6 +300,33 @@ func (a *Agent) Close() error {
 		return a.conn.Close()
 	}
 	return nil
+}
+
+// SendCommandResult sends a command_result message back to the orchestrator
+// for a fire-and-forget capability (one registered via AddCapability).
+// The result can be nil for simple acks. This is called automatically
+// for capabilities registered with AddCapabilityWithHandler.
+func (a *Agent) SendCommandResult(capabilityID string, result json.RawMessage) {
+	a.sendCommandResult(capabilityID, result)
+}
+
+// SendDisplay sends a display message to the orchestrator to be broadcast
+// to all connected display modules.
+func (a *Agent) SendDisplay(title, body, level string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.conn == nil {
+		return
+	}
+
+	payload := map[string]any{
+		"title": title,
+		"body":  body,
+		"level": level,
+	}
+	msg := envelope{Type: "display", Payload: mustMarshal(payload)}
+	_ = a.conn.WriteJSON(msg)
 }
 
 // envelope represents a WebSocket message envelope.

@@ -8,40 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/gorilla/websocket"
-
-	"github.com/eiachh/Modularis/internal/domain"
+	"github.com/eiachh/Modularis/pkg/agent"
 )
-
-// mustMarshal panics on marshal error (for static/safe data).
-func mustMarshal(v any) json.RawMessage {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
-// sendAck sends a minimal command_result acknowledgment to the orchestrator.
-func sendAck(conn *websocket.Conn, capabilityID string, log *slog.Logger) {
-	payload := map[string]any{
-		"capability_id": capabilityID,
-		"result":        nil,
-	}
-	if err := conn.WriteJSON(domain.Envelope{
-		Type:    domain.MessageTypeCommandResult,
-		Payload: mustMarshal(payload),
-	}); err != nil {
-		log.Error("failed to send ack", "capability_id", capabilityID, "error", err)
-	} else {
-		log.Info("sent acknowledgment", "capability_id", capabilityID)
-	}
-}
 
 func main() {
 	name := flag.String("name", "", "agent name (required)")
-	server := flag.String("server", "ws://localhost:18080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (falls back to ORCHESTRATOR_URL or default)")
 	flag.Parse()
 
 	if *name == "" {
@@ -52,241 +26,86 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	connectURL := *server + "/connect"
-	log.Info("connecting to orchestrator", "url", connectURL)
+	a := agent.New(*server, *name, 30*time.Second)
 
-	conn, _, err := websocket.DefaultDialer.Dial(connectURL, nil)
+	schemas := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"message": {
+				"type": "string",
+				"description": "Message to echo"
+			}
+		},
+		"required": ["message"]
+	}`)
+
+	a.AddCapability("echoNoReturn", schemas)
+	a.AddCapability("echoRespond", schemas)
+	a.AddCapability("echoTimeout", schemas)
+
+	log.Info("connecting agent to orchestrator via provider")
+	id, invocations, closed, err := a.Connect()
 	if err != nil {
 		log.Error("failed to connect", "error", err)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	log.Info("agent registered", "agent_id", id)
 
-	log.Info("connected, sending register message")
-
-	// --- Build and send register envelope ---------------------------------
-	//
-	// No capabilities in register payload (legacy support removed per
-	// requirements). Only agent name is sent. Capabilities are registered
-	// exclusively at runtime via capability_register message to support
-	// dynamic component loading.
-
-	regPayload, err := json.Marshal(domain.RegisterPayload{
-		Name: *name,
-	})
-	if err != nil {
-		log.Error("failed to marshal register payload", "error", err)
-		os.Exit(1)
-	}
-
-	env := domain.Envelope{
-		Type:    domain.MessageTypeRegister,
-		Payload: regPayload,
-	}
-
-	if err := conn.WriteJSON(env); err != nil {
-		log.Error("failed to send register message", "error", err)
-		os.Exit(1)
-	}
-
-	// --- Wait for register_ack or error -----------------------------------
-
-	var resp domain.Envelope
-	if err := conn.ReadJSON(&resp); err != nil {
-		log.Error("failed to read response", "error", err)
-		os.Exit(1)
-	}
-
-	switch resp.Type {
-	case domain.MessageTypeRegisterAck:
-		var ack domain.RegisterAckPayload
-		if err := json.Unmarshal(resp.Payload, &ack); err != nil {
-			log.Error("failed to decode register_ack", "error", err)
-			os.Exit(1)
-		}
-		log.Info("registered successfully", "agent_id", ack.AgentID)
-
-		// Notify all displays that this agent is up.
-		dpPayload, _ := json.Marshal(domain.DisplayPayload{
-			Title: "Agent Online",
-			Body:  fmt.Sprintf("Agent: %s is up", ack.AgentID),
-			Level: "info",
-		})
-		_ = conn.WriteJSON(domain.Envelope{
-			Type:    domain.MessageTypeDisplay,
-			Payload: dpPayload,
-		})
-
-		// --- Register capabilities (runtime-only, no legacy) --------------------
-		//
-		// 1) echoNoReturn: fire-and-forget; echoes to display only.
-		// 2) echoRespond: request-response; echoes to display AND sends command_result.
-		// 3) echoTimeout: never responds (for testing missing-response behavior).
-		schemas := json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"message": {
-					"type": "string",
-					"description": "Message to echo"
-				}
-			},
-			"required": ["message"]
-		}`)
-
-		for _, fn := range []string{"echoNoReturn", "echoRespond", "echoTimeout"} {
-			capReg := domain.CapabilityRegisterPayload{
-				AgentName:    *name,
-				FunctionName: fn,
-				Schema:       schemas,
-			}
-			capRegPayload, marshalErr := json.Marshal(capReg)
-			if marshalErr != nil {
-				log.Error("failed to marshal capability_register payload", "error", marshalErr)
-				continue
-			}
-			if err := conn.WriteJSON(domain.Envelope{
-				Type:    domain.MessageTypeCapabilityRegister,
-				Payload: capRegPayload,
-			}); err != nil {
-				log.Error("failed to send capability_register", "function", fn, "error", err)
-			} else {
-				log.Info("registered capability", "function_name", fn)
-			}
-		}
-
-		// Note: Command handling is in the background read loop below
-		// (receives forwarded commands from orchestrator).
-
-	case domain.MessageTypeError:
-		var errPayload domain.ErrorPayload
-		if err := json.Unmarshal(resp.Payload, &errPayload); err != nil {
-			log.Error("failed to decode error payload", "error", err)
-			os.Exit(1)
-		}
-		log.Error("registration rejected", "code", errPayload.Code, "message", errPayload.Message)
-		os.Exit(1)
-
-	default:
-		log.Error("unexpected response type", "type", resp.Type)
-		os.Exit(1)
-	}
-
-	// --- Stay alive until interrupted -------------------------------------
-
-	log.Info("agent running, waiting for messages (ctrl+c to stop)")
+	// Send initial display
+	a.SendDisplay("Agent Online", fmt.Sprintf("Agent: %s is up", id), "info")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	// Read loop in background so we notice if the orchestrator drops us.
-	// Handles forwarded commands (e.g., "echo"): processes and sends to
-	// display (as specified; only echo supported).
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			var msg domain.Envelope
-			if err := conn.ReadJSON(&msg); err != nil {
-				log.Info("connection closed", "error", err)
+	log.Info("agent running, waiting for commands")
+
+	for {
+		select {
+		case inv, ok := <-invocations:
+			if !ok {
+				log.Info("invocations channel closed")
 				return
 			}
+			log.Info("received command", "function", inv.Name, "capability_id", inv.ID)
 
-			// Handle commands forwarded from orchestrator/client.
-			switch msg.Type {
-			case domain.MessageTypeCommand:
-				var cmd domain.CommandPayload
-				if err := json.Unmarshal(msg.Payload, &cmd); err != nil {
-					log.Error("invalid command payload", "error", err)
-					continue
-				}
-				log.Info("received command",
-					"function", cmd.FunctionName,
-					"capability_id", cmd.CapabilityID,
-				)
+			var args struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(inv.Args, &args); err != nil {
+				log.Error("invalid args", "error", err)
+				continue
+			}
 
-				// Parse common args (all three take a "message" string).
-				var args struct {
-					Message string `json:"message"`
-				}
-				if err := json.Unmarshal(cmd.Args, &args); err != nil {
-					log.Error("invalid args", "function", cmd.FunctionName, "error", err)
-					continue
-				}
+			switch inv.Name {
+			case "echoNoReturn":
+				a.SendDisplay(fmt.Sprintf("EchoNoReturn from %s", *name), fmt.Sprintf("Echo: %s", args.Message), "info")
+				a.SendCommandResult(inv.ID, nil)
+				log.Info("echoNoReturn acked")
 
-				switch cmd.FunctionName {
-				case "echoNoReturn":
-					// Fire-and-forget: echo to display, then acknowledge.
-					dpPayload, _ := json.Marshal(domain.DisplayPayload{
-						Title: fmt.Sprintf("EchoNoReturn from %s", cmd.AgentName),
-						Body:  fmt.Sprintf("Echo: %s", args.Message),
-						Level: "info",
-					})
-					if err := conn.WriteJSON(domain.Envelope{
-						Type:    domain.MessageTypeDisplay,
-						Payload: dpPayload,
-					}); err != nil {
-						log.Error("failed to broadcast echoNoReturn to display", "error", err)
-					} else {
-						log.Info("echoNoReturn sent to display", "message", args.Message)
-					}
-					// Acknowledge (no result data)
-					sendAck(conn, cmd.CapabilityID, log)
+			case "echoRespond":
+				a.SendDisplay(fmt.Sprintf("EchoRespond from %s", *name), fmt.Sprintf("Echo: %s", args.Message), "info")
+				result := map[string]string{"message": args.Message}
+				resBytes, _ := json.Marshal(result)
+				a.SendCommandResult(inv.ID, resBytes)
+				log.Info("echoRespond result sent")
 
-				case "echoRespond":
-					// Request-response: echo to display AND send command_result.
-					dpPayload, _ := json.Marshal(domain.DisplayPayload{
-						Title: fmt.Sprintf("EchoRespond from %s", cmd.AgentName),
-						Body:  fmt.Sprintf("Echo: %s", args.Message),
-						Level: "info",
-					})
-					_ = conn.WriteJSON(domain.Envelope{
-						Type:    domain.MessageTypeDisplay,
-						Payload: dpPayload,
-					})
-					log.Info("echoRespond sent to display", "message", args.Message)
-
-					// Send command_result back to orchestrator.
-					resultPayload := map[string]any{
-						"capability_id": cmd.CapabilityID,
-						"result":        map[string]string{"message": args.Message},
-					}
-					if err := conn.WriteJSON(domain.Envelope{
-						Type:    domain.MessageTypeCommandResult,
-						Payload: mustMarshal(resultPayload),
-					}); err != nil {
-						log.Error("failed to send command_result", "capability_id", cmd.CapabilityID, "error", err)
-					} else {
-						log.Info("echoRespond sent command_result",
-							"capability_id", cmd.CapabilityID,
-							"result", args.Message,
-						)
-					}
-
-				case "echoTimeout":
-					// Never responds: just log (for testing missing response).
-					log.Info("echoTimeout received — intentionally not responding",
-						"capability_id", cmd.CapabilityID,
-						"message", args.Message,
-					)
-
-				default:
-					log.Warn("unknown command", "function", cmd.FunctionName)
-				}
+			case "echoTimeout":
+				log.Info("echoTimeout received - intentionally not responding", "message", args.Message)
 
 			default:
-				log.Debug("received message", "type", msg.Type)
+				log.Warn("unknown command", "function", inv.Name)
 			}
-		}
-	}()
 
-	select {
-	case <-sigCh:
-		log.Info("shutting down")
-		_ = conn.WriteMessage(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent shutting down"),
-		)
-	case <-done:
-		log.Info("orchestrator closed the connection")
+		case _, ok := <-closed:
+			if !ok {
+				return
+			}
+			log.Info("connection lost, provider reconnecting...")
+
+		case <-sigCh:
+			log.Info("shutting down")
+			a.Close()
+			return
+		}
 	}
 }

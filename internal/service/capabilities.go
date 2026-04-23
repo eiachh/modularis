@@ -12,7 +12,8 @@ import (
 	"github.com/eiachh/Modularis/internal/policy"
 	"github.com/eiachh/Modularis/internal/registry"
 	"github.com/eiachh/Modularis/internal/ws"
-	"github.com/eiachh/Modularis/pkg"
+	client "github.com/eiachh/Modularis/pkg/client"
+	pkg "github.com/eiachh/Modularis/pkg"
 )
 
 // CapabilitiesService handles capability discovery and command invocation.
@@ -51,7 +52,7 @@ func (s *CapabilitiesService) ListSummaries() []domain.CapabilitySummary {
 // schema, and forwards the command over the agent's WebSocket connection.
 // identity is the caller's identity (token string for HTTP clients, agent name for WS).
 // Policy authorization is enforced before proceeding, with delegation support.
-func (s *CapabilitiesService) Invoke(req pkg.InvokeCommand, identity string) (domain.CommandResultPayload, error) {
+func (s *CapabilitiesService) Invoke(req client.InvokeCommand, identity string) (domain.CommandResultPayload, error) {
 	// Policy check first (default deny), with delegation support
 	if s.Policy != nil {
 		allowed, effectiveIdentity := s.Policy.AuthorizeWithDelegation(identity, req.AgentName, req.FunctionName)

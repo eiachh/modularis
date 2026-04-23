@@ -23,7 +23,7 @@ import (
 // Without -token, calls will fail with 401 (missing token required by orchestrator).
 
 func main() {
-	server := flag.String("server", "http://localhost:8080", "orchestrator address")
+	server := flag.String("server", "", "orchestrator address (ORCHESTRATOR_URL or default)")
 	agent := flag.String("agent", "myagent", "agent name")
 	token := flag.String("token", "", "bearer token for Authorization header (for policy-protected calls)")
 	flag.Parse()

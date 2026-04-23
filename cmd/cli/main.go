@@ -46,8 +46,17 @@ type policyPolicy struct {
 }
 
 func main() {
-	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (ORCHESTRATOR_URL or default)")
 	flag.Parse()
+
+	// Resolve server address the same way the client provider does
+	if *server == "" {
+		if v := os.Getenv("ORCHESTRATOR_URL"); v != "" {
+			*server = v
+		} else {
+			*server = "http://localhost:8080"
+		}
+	}
 
 	fmt.Println("=== Modularis CLI ===")
 	fmt.Printf("Server: %s\n\n", *server)
@@ -172,6 +181,13 @@ func main() {
 }
 
 func claimSUToken(server string) (string, error) {
+	if server == "" {
+		if v := os.Getenv("ORCHESTRATOR_URL"); v != "" {
+			server = v
+		} else {
+			server = "http://localhost:8080"
+		}
+	}
 	url := server + "/su/token"
 	resp, err := http.Post(url, "application/json", nil)
 	if err != nil {
@@ -199,26 +215,26 @@ func claimSUToken(server string) (string, error) {
 	return tr.Token, nil
 }
 
-func grantPolicyForAll(server, suToken string, caps []client.Capability) error {
+func grantPolicyForAll(c *client.Client, caps []client.Capability) error {
 	// Create a role "su_cli_all" with allow for each (agent, cap)
-	role := policyRole{Name: "su_cli_all"}
+	role := client.Role{Name: "su_cli_all"}
 	for _, cap := range caps {
-		role.Rules = append(role.Rules, policyRoleRule{
+		role.Rules = append(role.Rules, client.RoleRule{
 			ServiceID:  cap.AgentName,
 			Capability: cap.FunctionName,
 			Effect:     "allow",
 		})
 	}
-	if err := postJSON(server+"/policy/role", suToken, role); err != nil {
+	if err := c.CreateRole(role); err != nil {
 		return fmt.Errorf("create role: %w", err)
 	}
 	// Bind the SU token identity to that role
-	pol := policyPolicy{
-		Identity: suToken,
+	pol := client.Policy{
+		Identity: c.Token(),
 		Roles:    []string{"su_cli_all"},
-		Rules:    []any{},
+		Rules:    []client.RoleRule{},
 	}
-	if err := postJSON(server+"/policy", suToken, pol); err != nil {
+	if err := c.CreatePolicy(pol); err != nil {
 		return fmt.Errorf("create policy: %w", err)
 	}
 	return nil
@@ -249,7 +265,7 @@ func doGrantPolicyForAll(c *client.Client, server, suToken string, scanner *bufi
 		return
 	}
 
-	if err := grantPolicyForAll(server, suToken, caps); err != nil {
+	if err := grantPolicyForAll(c, caps); err != nil {
 		fmt.Printf("Failed: %v\n", err)
 		return
 	}
