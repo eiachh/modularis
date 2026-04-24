@@ -1,13 +1,18 @@
 package display
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/eiachh/Modularis/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
+
+const defaultOrchestratorURL = "http://localhost:8080"
 
 // Message represents a display message received from the orchestrator.
 type Message struct {
@@ -27,24 +32,35 @@ type Message struct {
 // and receive messages. It handles the WebSocket connection and reconnection protocol.
 type Display struct {
 	orchestratorURL string
-	displayName      string
-	displayType      string
-	conn             *websocket.Conn
-	mu               sync.Mutex
-	messages         chan Message
-	closed           chan struct{}
-	maxBackoff       time.Duration
+	displayName     string
+	displayType     string
+	conn            *websocket.Conn
+	mu              sync.Mutex
+	messages        chan Message
+	closed          chan struct{}
+	done            chan struct{}
+	doneOnce        sync.Once
+	maxBackoff      time.Duration
 }
 
 // New creates a new Display instance configured with the given orchestrator URL,
 // display name, display type, and maximum reconnection backoff.
+// If orchestratorURL is empty, falls back to ORCHESTRATOR_URL env or default.
 func New(orchestratorURL, displayName, displayType string, maxBackoff time.Duration) *Display {
+	if orchestratorURL == "" {
+		if v := os.Getenv("ORCHESTRATOR_URL"); v != "" {
+			orchestratorURL = v
+		} else {
+			orchestratorURL = defaultOrchestratorURL
+		}
+	}
 	return &Display{
 		orchestratorURL: orchestratorURL,
 		displayName:     displayName,
 		displayType:     displayType,
 		messages:        make(chan Message, 100),
 		closed:          make(chan struct{}, 1),
+		done:            make(chan struct{}),
 		maxBackoff:      maxBackoff,
 	}
 }
@@ -86,14 +102,14 @@ func (d *Display) connectAndRegister() (string, error) {
 		"name": d.displayName,
 		"type": d.displayType,
 	}
-	registerMsg := envelope{Type: "display_register", Payload: mustMarshal(registerPayload)}
+	registerMsg := protocol.Envelope{Type: "display_register", Payload: protocol.MustMarshal(registerPayload)}
 	if err := d.conn.WriteJSON(registerMsg); err != nil {
 		d.conn.Close()
 		return "", fmt.Errorf("failed to send display_register message: %w", err)
 	}
 
 	// Wait for display_register_ack
-	var ack envelope
+	var ack protocol.Envelope
 	if err := d.conn.ReadJSON(&ack); err != nil {
 		d.conn.Close()
 		return "", fmt.Errorf("failed to read display_register_ack: %w", err)
@@ -118,8 +134,20 @@ func (d *Display) connectAndRegister() (string, error) {
 func (d *Display) readLoop() {
 	backoff := 1 * time.Second
 	for {
-		var env envelope
+		select {
+		case <-d.done:
+			return
+		default:
+		}
+
+		var env protocol.Envelope
 		if err := d.conn.ReadJSON(&env); err != nil {
+			select {
+			case <-d.done:
+				return
+			default:
+			}
+
 			// Connection lost or closed - attempt reconnection with backoff
 			d.mu.Lock()
 			if d.conn != nil {
@@ -135,9 +163,12 @@ func (d *Display) readLoop() {
 
 			// Incremental backoff reconnection loop
 			for {
-				time.Sleep(backoff)
+				select {
+				case <-d.done:
+					return
+				case <-time.After(backoff):
+				}
 				if _, err := d.connectAndRegister(); err == nil {
-					// Reconnected successfully
 					backoff = 1 * time.Second
 					break
 				}
@@ -152,7 +183,6 @@ func (d *Display) readLoop() {
 		if env.Type == "display" {
 			var msg Message
 			if err := json.Unmarshal(env.Payload, &msg); err == nil {
-				// Non-blocking send
 				select {
 				case d.messages <- msg:
 				default:
@@ -162,8 +192,10 @@ func (d *Display) readLoop() {
 	}
 }
 
-// Close closes the WebSocket connection to the orchestrator.
+// Close signals the readLoop to stop and closes the WebSocket connection.
 func (d *Display) Close() error {
+	d.doneOnce.Do(func() { close(d.done) })
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -173,17 +205,29 @@ func (d *Display) Close() error {
 	return nil
 }
 
-// envelope represents a WebSocket message envelope.
-type envelope struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-// mustMarshal is a helper that panics on marshal error (for static data).
-func mustMarshal(v any) json.RawMessage {
-	data, err := json.Marshal(v)
+// Run connects to the orchestrator and runs the event loop, blocking until
+// ctx is cancelled. The handler is called for each display message received.
+// Returns the assigned display ID.
+func (d *Display) Run(ctx context.Context, handler func(Message)) (string, error) {
+	id, messages, closed, err := d.Connect()
 	if err != nil {
-		panic(err)
+		return "", err
 	}
-	return data
+
+	for {
+		select {
+		case <-ctx.Done():
+			d.Close()
+			return id, nil
+		case msg, ok := <-messages:
+			if !ok {
+				return id, nil
+			}
+			handler(msg)
+		case _, ok := <-closed:
+			if !ok {
+				return id, nil
+			}
+		}
+	}
 }

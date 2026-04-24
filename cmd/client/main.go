@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -63,26 +64,15 @@ func main() {
 		fmt.Printf("  InvocationID: %s\n", resp.InvocationID)
 		fmt.Printf("  Immediate result: %s\n", resp.Result)
 
-		// Step 2: GetInvokeResult (blocking with timeout for demo)
-		done := make(chan client.InvokeResult, 1)
-		go func() {
-			r, err := c.GetInvokeResult(resp.InvocationID)
-			if err != nil {
-				fmt.Printf("  GetInvokeResult error: %v\n", err)
-				done <- client.InvokeResult{}
-			} else {
-				done <- r
-			}
-		}()
-
-		select {
-		case r := <-done:
-			if r.CapabilityID != "" || r.Success {
-				fmt.Printf("  Result: success=%v capability_id=%s result=%s\n",
-					r.Success, r.CapabilityID, string(r.Result))
-			}
-		case <-time.After(tc.timeout):
-			fmt.Printf("  GetInvokeResult timed out after %v (expected for echoTimeout)\n", tc.timeout)
+		// Step 2: GetInvokeResult with context timeout
+		ctx, cancel := context.WithTimeout(context.Background(), tc.timeout)
+		r, err := c.GetInvokeResultCtx(ctx, resp.InvocationID)
+		cancel()
+		if err != nil {
+			fmt.Printf("  GetInvokeResult: %v (expected for echoTimeout)\n", err)
+		} else if r.CapabilityID != "" || r.Success {
+			fmt.Printf("  Result: success=%v capability_id=%s result=%s\n",
+				r.Success, r.CapabilityID, string(r.Result))
 		}
 	}
 

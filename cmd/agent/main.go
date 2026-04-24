@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -43,69 +44,44 @@ func main() {
 	a.AddCapability("echoRespond", schemas)
 	a.AddCapability("echoTimeout", schemas)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	log.Info("connecting agent to orchestrator via provider")
-	id, invocations, closed, err := a.Connect()
+	id, err := a.Run(ctx, func(inv agent.Invocation) {
+		log.Info("received command", "function", inv.Name, "capability_id", inv.ID)
+
+		var args struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(inv.Args, &args); err != nil {
+			log.Error("invalid args", "error", err)
+			return
+		}
+
+		switch inv.Name {
+		case "echoNoReturn":
+			a.SendDisplay(fmt.Sprintf("EchoNoReturn from %s", *name), fmt.Sprintf("Echo: %s", args.Message), "info")
+			a.SendCommandResult(inv.ID, nil)
+			log.Info("echoNoReturn acked")
+
+		case "echoRespond":
+			a.SendDisplay(fmt.Sprintf("EchoRespond from %s", *name), fmt.Sprintf("Echo: %s", args.Message), "info")
+			result := map[string]string{"message": args.Message}
+			resBytes, _ := json.Marshal(result)
+			a.SendCommandResult(inv.ID, resBytes)
+			log.Info("echoRespond result sent")
+
+		case "echoTimeout":
+			log.Info("echoTimeout received - intentionally not responding", "message", args.Message)
+
+		default:
+			log.Warn("unknown command", "function", inv.Name)
+		}
+	})
 	if err != nil {
 		log.Error("failed to connect", "error", err)
 		os.Exit(1)
 	}
-	log.Info("agent registered", "agent_id", id)
-
-	// Send initial display
-	a.SendDisplay("Agent Online", fmt.Sprintf("Agent: %s is up", id), "info")
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	log.Info("agent running, waiting for commands")
-
-	for {
-		select {
-		case inv, ok := <-invocations:
-			if !ok {
-				log.Info("invocations channel closed")
-				return
-			}
-			log.Info("received command", "function", inv.Name, "capability_id", inv.ID)
-
-			var args struct {
-				Message string `json:"message"`
-			}
-			if err := json.Unmarshal(inv.Args, &args); err != nil {
-				log.Error("invalid args", "error", err)
-				continue
-			}
-
-			switch inv.Name {
-			case "echoNoReturn":
-				a.SendDisplay(fmt.Sprintf("EchoNoReturn from %s", *name), fmt.Sprintf("Echo: %s", args.Message), "info")
-				a.SendCommandResult(inv.ID, nil)
-				log.Info("echoNoReturn acked")
-
-			case "echoRespond":
-				a.SendDisplay(fmt.Sprintf("EchoRespond from %s", *name), fmt.Sprintf("Echo: %s", args.Message), "info")
-				result := map[string]string{"message": args.Message}
-				resBytes, _ := json.Marshal(result)
-				a.SendCommandResult(inv.ID, resBytes)
-				log.Info("echoRespond result sent")
-
-			case "echoTimeout":
-				log.Info("echoTimeout received - intentionally not responding", "message", args.Message)
-
-			default:
-				log.Warn("unknown command", "function", inv.Name)
-			}
-
-		case _, ok := <-closed:
-			if !ok {
-				return
-			}
-			log.Info("connection lost, provider reconnecting...")
-
-		case <-sigCh:
-			log.Info("shutting down")
-			a.Close()
-			return
-		}
-	}
+	log.Info("agent stopped", "agent_id", id)
 }

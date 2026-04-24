@@ -2,12 +2,14 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
 
 // ErrConnNotReady is returned when the orchestrator connection is not available.
@@ -225,6 +227,30 @@ func (c *Client) GetInvokeResult(invocationID string) (InvokeResult, error) {
 		return InvokeResult{}, fmt.Errorf("failed to decode result: %w", err)
 	}
 	return ir, nil
+}
+
+// ErrResultTimeout is returned when GetInvokeResultCtx times out.
+var ErrResultTimeout = errors.New("timed out waiting for invocation result")
+
+// GetInvokeResultCtx polls for an invocation result, respecting the given
+// context for cancellation/timeout. It retries every 500ms until a result
+// is available, the context is cancelled, or a non-retryable error occurs.
+func (c *Client) GetInvokeResultCtx(ctx context.Context, invocationID string) (InvokeResult, error) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		res, err := c.GetInvokeResult(invocationID)
+		if err == nil {
+			return res, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return InvokeResult{}, ErrResultTimeout
+		case <-ticker.C:
+		}
+	}
 }
 
 // Grant represents a capability delegation grant.

@@ -47,6 +47,7 @@ type policyPolicy struct {
 
 func main() {
 	server := flag.String("server", "", "orchestrator base URL (ORCHESTRATOR_URL or default)")
+	tokenFlag := flag.String("token", "", "use an existing SU token instead of claiming a new one")
 	flag.Parse()
 
 	// Resolve server address the same way the client provider does
@@ -61,20 +62,29 @@ func main() {
 	fmt.Println("=== Modularis CLI ===")
 	fmt.Printf("Server: %s\n\n", *server)
 
-	// --- Try to claim SU token ---
-	suToken, err := claimSUToken(*server)
+	var suToken string
 	var isSU bool
-	if err != nil {
-		fmt.Printf("Note: Could not claim SU token (%v)\n", err)
-		fmt.Println("Running as regular client. Some operations will be unavailable.")
-		fmt.Println("To get SU access, restart the orchestrator or use an existing SU token.")
-		fmt.Println()
-		isSU = false
-	} else {
-		fmt.Println("SU TOKEN (save this for admin use):")
-		fmt.Println(suToken)
-		fmt.Println()
+
+	if *tokenFlag != "" {
+		suToken = *tokenFlag
 		isSU = true
+		fmt.Println("Using provided SU token.")
+		fmt.Println()
+	} else {
+		var err error
+		suToken, err = claimSUToken(*server)
+		if err != nil {
+			fmt.Printf("Note: Could not claim SU token (%v)\n", err)
+			fmt.Println("Running as regular client. Some operations will be unavailable.")
+			fmt.Println("Tip: use -token <SU_TOKEN> to pass an existing SU token.")
+			fmt.Println()
+			isSU = false
+		} else {
+			fmt.Println("SU TOKEN (save this for admin use):")
+			fmt.Println(suToken)
+			fmt.Println()
+			isSU = true
+		}
 	}
 
 	// --- Build client ---
@@ -142,7 +152,7 @@ func main() {
 			}
 		case "8":
 			if isSU {
-				doCreatePolicy(*server, suToken, scanner)
+				doCreatePolicy(c, *server, suToken, scanner)
 			} else {
 				fmt.Println("This operation requires SU privileges.")
 			}
@@ -359,7 +369,7 @@ func doCreateRole(server, token string, scanner *bufio.Scanner) {
 	fmt.Printf("Created role %q with %d rules.\n", name, len(rules))
 }
 
-func doCreatePolicy(server, token string, scanner *bufio.Scanner) {
+func doCreatePolicy(c *client.Client, server, token string, scanner *bufio.Scanner) {
 	// Get current roles for reference
 	body, _ := getJSON(server+"/policy/roles", token)
 	var roleList struct {
@@ -369,13 +379,40 @@ func doCreatePolicy(server, token string, scanner *bufio.Scanner) {
 	}
 	_ = json.Unmarshal(body, &roleList) // ignore error, optional
 
-	fmt.Printf("Identity (token) [press Enter for SU token]> ")
+	// Fetch tokens so the user can select by index
+	tokensResp, _ := c.ListTokens()
+	if len(tokensResp.Tokens) > 0 {
+		fmt.Println("Available tokens:")
+		for i, t := range tokensResp.Tokens {
+			tokenPreview := t.Token
+			if len(tokenPreview) > 40 {
+				tokenPreview = tokenPreview[:40] + "..."
+			}
+			suMark := ""
+			if t.IsSU {
+				suMark = " [SU]"
+			}
+			fmt.Printf("  [%d] %s%s\n", i, tokenPreview, suMark)
+		}
+	}
+
+	fmt.Print("Identity (token) [press Enter for SU token, or enter index]> ")
 	if !scanner.Scan() {
 		return
 	}
-	identity := strings.TrimSpace(scanner.Text())
-	if identity == "" {
+	input := strings.TrimSpace(scanner.Text())
+	var identity string
+	if input == "" {
 		identity = token
+	} else if idx, err := strconv.Atoi(input); err == nil && idx >= 0 && idx < len(tokensResp.Tokens) {
+		identity = tokensResp.Tokens[idx].Token
+		preview := identity
+		if len(preview) > 40 {
+			preview = preview[:40] + "..."
+		}
+		fmt.Printf("Selected token: %s\n", preview)
+	} else {
+		identity = input
 	}
 
 	var roleNames []string

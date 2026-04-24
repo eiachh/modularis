@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -25,15 +26,14 @@ type DeferredCallArgs struct {
 
 func main() {
 	name := flag.String("name", "cron-service", "agent name")
-	server := flag.String("server", "", "orchestrator base URL (ws/http, falls back to env)")
-	httpServer := flag.String("http-server", "", "orchestrator HTTP URL (falls back to env)")
+	server := flag.String("server", "", "orchestrator base URL (falls back to ORCHESTRATOR_URL env or default)")
 	token := flag.String("token", "", "bearer token (if empty, client auto-claims)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Client for re-invoking targets (auto claims token if needed)
-	c := client.New(*httpServer)
+	c := client.New(*server)
 	if *token != "" {
 		c.SetToken(*token)
 	}
@@ -53,79 +53,58 @@ func main() {
 
 	a.AddCapability("deferredCall", schema)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var pending sync.WaitGroup
+
 	log.Info("connecting cron agent via provider")
-	id, invocations, closed, err := a.Connect()
+	id, err := a.Run(ctx, func(inv agent.Invocation) {
+		if inv.Name != "deferredCall" {
+			return
+		}
+
+		var args DeferredCallArgs
+		if err := json.Unmarshal(inv.Args, &args); err != nil {
+			log.Error("invalid args", "error", err)
+			a.SendCommandResult(inv.ID, mustJSON(map[string]any{"error": err.Error()}))
+			return
+		}
+
+		log.Info("scheduling deferred", "target", args.TargetAgent+"/"+args.TargetCapability, "delay", args.DelaySeconds)
+
+		// Immediate ack
+		ack := map[string]string{"message": fmt.Sprintf("scheduled in %d seconds", args.DelaySeconds)}
+		ackBytes, _ := json.Marshal(ack)
+		a.SendCommandResult(inv.ID, ackBytes)
+
+		pending.Add(1)
+		go func(args DeferredCallArgs) {
+			defer pending.Done()
+			time.Sleep(time.Duration(args.DelaySeconds) * time.Second)
+
+			log.Info("executing deferred call", "target", args.TargetAgent+"/"+args.TargetCapability)
+			invokeCmd := client.InvokeCommand{
+				AgentName:    args.TargetAgent,
+				FunctionName: args.TargetCapability,
+				Args:         args.TargetArgs,
+			}
+			resp, err := c.Invoke(invokeCmd)
+			level := "success"
+			body := resp.Result
+			if err != nil {
+				level = "error"
+				body = err.Error()
+			}
+			a.SendDisplay(fmt.Sprintf("Deferred Call: %s/%s", args.TargetAgent, args.TargetCapability), body, level)
+		}(args)
+	})
 	if err != nil {
 		log.Error("failed to connect", "error", err)
 		os.Exit(1)
 	}
-	log.Info("cron registered", "agent_id", id)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	var pending sync.WaitGroup
-
-	log.Info("cron running, waiting for deferredCall commands")
-
-	for {
-		select {
-		case inv, ok := <-invocations:
-			if !ok {
-				return
-			}
-			if inv.Name != "deferredCall" {
-				continue
-			}
-
-			var args DeferredCallArgs
-			if err := json.Unmarshal(inv.Args, &args); err != nil {
-				log.Error("invalid args", "error", err)
-				a.SendCommandResult(inv.ID, mustJSON(map[string]any{"error": err.Error()}))
-				continue
-			}
-
-			log.Info("scheduling deferred", "target", args.TargetAgent+"/"+args.TargetCapability, "delay", args.DelaySeconds)
-
-			// Immediate ack
-			ack := map[string]string{"message": fmt.Sprintf("scheduled in %d seconds", args.DelaySeconds)}
-			ackBytes, _ := json.Marshal(ack)
-			a.SendCommandResult(inv.ID, ackBytes)
-
-			pending.Add(1)
-			go func(args DeferredCallArgs, invID string) {
-				defer pending.Done()
-				time.Sleep(time.Duration(args.DelaySeconds) * time.Second)
-
-				log.Info("executing deferred call", "target", args.TargetAgent+"/"+args.TargetCapability)
-				invokeCmd := client.InvokeCommand{
-					AgentName:    args.TargetAgent,
-					FunctionName: args.TargetCapability,
-					Args:         args.TargetArgs,
-				}
-				resp, err := c.Invoke(invokeCmd)
-				level := "success"
-				body := resp.Result
-				if err != nil {
-					level = "error"
-					body = err.Error()
-				}
-				a.SendDisplay(fmt.Sprintf("Deferred Call: %s/%s", args.TargetAgent, args.TargetCapability), body, level)
-			}(args, inv.ID)
-
-		case _, ok := <-closed:
-			if !ok {
-				return
-			}
-			log.Info("connection lost (reconnecting...)")
-
-		case <-sigCh:
-			log.Info("shutting down")
-			a.Close()
-			pending.Wait()
-			return
-		}
-	}
+	log.Info("cron stopped, waiting for pending calls", "agent_id", id)
+	pending.Wait()
 }
 
 func mustJSON(v any) json.RawMessage {

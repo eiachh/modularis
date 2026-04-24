@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/eiachh/Modularis/pkg/agent"
@@ -19,97 +19,44 @@ func main() {
 	agentName := flag.String("agent", "hybrid-agent", "agent name for registration")
 	flag.Parse()
 
-	// 1. Setup and Connect Agent
-	invocations, closed := setupAgent(*server, *agentName)
+	// 1. Setup Agent
+	a := agent.New(*server, *agentName, 30*time.Second)
 
-	// 2. Handle Invocations in Background
-	go handleEvents(invocations, closed)
+	msgSchema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"message": {
+				"type": "string",
+				"description": "The message"
+			}
+		},
+		"required": ["message"]
+	}`)
+	a.AddCapability("scream", msgSchema)
+	a.AddCapability("longExec", msgSchema)
+	a.AddCapability("fastExec", msgSchema)
+
+	// 2. Run Agent in background (cancelled when interactive loop exits)
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	defer agentCancel()
+
+	go func() {
+		id, err := a.Run(agentCtx, func(inv agent.Invocation) {
+			handleInvocation(inv)
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to connect agent: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\n[AGENT] stopped (ID: %s)\n", id)
+	}()
 
 	// Give the orchestrator a moment to process the registration
 	time.Sleep(100 * time.Millisecond)
 
-	// 3. Setup Client
+	// 3. Setup Client and run interactive loop
 	c := client.New(*server)
-
-	// 4. Interactive Loop
 	runInteractiveLoop(c)
-}
-
-func setupAgent(server, agentName string) (<-chan agent.Invocation, <-chan struct{}) {
-	a := agent.New(server, agentName, 30*time.Second)
-
-	// Add the "scream" capability
-	screamSchema := json.RawMessage(`{
-		"type": "object",
-		"properties": {
-			"message": {
-				"type": "string",
-				"description": "The message to scream"
-			}
-		},
-		"required": ["message"]
-	}`)
-	a.AddCapability("scream", screamSchema)
-
-	// Add the "longExec" capability - blocks for 30 seconds
-	longExecSchema := json.RawMessage(`{
-		"type": "object",
-		"properties": {
-			"message": {
-				"type": "string",
-				"description": "The message for long execution"
-			}
-		},
-		"required": ["message"]
-	}`)
-	a.AddCapability("longExec", longExecSchema)
-
-	// Add the "fastExec" capability - blocks for 5 seconds
-	fastExecSchema := json.RawMessage(`{
-		"type": "object",
-		"properties": {
-			"message": {
-				"type": "string",
-				"description": "The message for fast execution"
-			}
-		},
-		"required": ["message"]
-	}`)
-	a.AddCapability("fastExec", fastExecSchema)
-
-	fmt.Printf("Connecting agent %q to orchestrator...\n", agentName)
-	id, invocations, closed, err := a.Connect()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to connect agent: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Agent connected and capabilities registered! (ID: %s)\n", id)
-	return invocations, closed
-}
-
-func handleEvents(invocations <-chan agent.Invocation, closed <-chan struct{}) {
-	var wg sync.WaitGroup
-
-	for {
-		select {
-		case inv, ok := <-invocations:
-			if !ok {
-				return
-			}
-			wg.Add(1)
-			go func(i agent.Invocation) {
-				defer wg.Done()
-				handleInvocation(i)
-			}(inv)
-		case _, ok := <-closed:
-			if !ok {
-				return
-			}
-			fmt.Println("\n[AGENT] Connection to orchestrator lost! Waiting for reconnection...")
-			// In this hybrid client, we don't exit, we just log and wait.
-			// The agent provider handles the actual reconnection.
-		}
-	}
 }
 
 func handleInvocation(inv agent.Invocation) {

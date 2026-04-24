@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/eiachh/Modularis/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -34,6 +36,8 @@ type Agent struct {
 	mu              sync.Mutex
 	invocations     chan Invocation
 	closed          chan struct{}
+	done            chan struct{}
+	doneOnce        sync.Once
 	maxBackoff      time.Duration
 
 	// handlers maps capability function names to their handler functions.
@@ -62,6 +66,7 @@ func New(orchestratorURL, agentName string, maxBackoff time.Duration) *Agent {
 		capabilities:    make([]Invocation, 0),
 		invocations:     make(chan Invocation, 100),
 		closed:          make(chan struct{}, 1),
+		done:            make(chan struct{}),
 		maxBackoff:      maxBackoff,
 		handlers:        make(map[string]func(json.RawMessage) json.RawMessage),
 	}
@@ -141,14 +146,14 @@ func (a *Agent) connectAndRegister() (string, error) {
 
 	// Send register message
 	registerPayload := map[string]string{"name": a.agentName}
-	registerMsg := envelope{Type: "register", Payload: mustMarshal(registerPayload)}
+	registerMsg := protocol.Envelope{Type: "register", Payload: protocol.MustMarshal(registerPayload)}
 	if err := a.conn.WriteJSON(registerMsg); err != nil {
 		a.conn.Close()
 		return "", fmt.Errorf("failed to send register message: %w", err)
 	}
 
 	// Wait for register_ack
-	var ack envelope
+	var ack protocol.Envelope
 	if err := a.conn.ReadJSON(&ack); err != nil {
 		a.conn.Close()
 		return "", fmt.Errorf("failed to read register_ack: %w", err)
@@ -174,14 +179,14 @@ func (a *Agent) connectAndRegister() (string, error) {
 			"function_name": cap.Name,
 			"schema":        cap.Args,
 		}
-		capMsg := envelope{Type: "capability_register", Payload: mustMarshal(capPayload)}
+		capMsg := protocol.Envelope{Type: "capability_register", Payload: protocol.MustMarshal(capPayload)}
 		if err := a.conn.WriteJSON(capMsg); err != nil {
 			a.conn.Close()
 			return "", fmt.Errorf("failed to register capability %s: %w", cap.Name, err)
 		}
 
 		// Wait for capability_register_ack
-		var capAck envelope
+		var capAck protocol.Envelope
 		if err := a.conn.ReadJSON(&capAck); err != nil {
 			a.conn.Close()
 			return "", fmt.Errorf("failed to read capability_register_ack: %w", err)
@@ -199,8 +204,21 @@ func (a *Agent) connectAndRegister() (string, error) {
 func (a *Agent) readLoop() {
 	backoff := 1 * time.Second
 	for {
-		var env envelope
+		select {
+		case <-a.done:
+			return
+		default:
+		}
+
+		var env protocol.Envelope
 		if err := a.conn.ReadJSON(&env); err != nil {
+			// Check if we were asked to stop before reconnecting
+			select {
+			case <-a.done:
+				return
+			default:
+			}
+
 			// Connection lost or closed - attempt reconnection with backoff
 			a.mu.Lock()
 			if a.conn != nil {
@@ -216,9 +234,12 @@ func (a *Agent) readLoop() {
 
 			// Incremental backoff reconnection loop
 			for {
-				time.Sleep(backoff)
+				select {
+				case <-a.done:
+					return
+				case <-time.After(backoff):
+				}
 				if _, err := a.connectAndRegister(); err == nil {
-					// Reconnected successfully
 					backoff = 1 * time.Second
 					break
 				}
@@ -287,12 +308,14 @@ func (a *Agent) sendCommandResult(capabilityID string, result json.RawMessage) {
 		"capability_id": capabilityID,
 		"result":        result,
 	}
-	msg := envelope{Type: "command_result", Payload: mustMarshal(payload)}
+	msg := protocol.Envelope{Type: "command_result", Payload: protocol.MustMarshal(payload)}
 	_ = a.conn.WriteJSON(msg)
 }
 
-// Close closes the WebSocket connection to the orchestrator.
+// Close signals the readLoop to stop and closes the WebSocket connection.
 func (a *Agent) Close() error {
+	a.doneOnce.Do(func() { close(a.done) })
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -325,21 +348,34 @@ func (a *Agent) SendDisplay(title, body, level string) {
 		"body":  body,
 		"level": level,
 	}
-	msg := envelope{Type: "display", Payload: mustMarshal(payload)}
+	msg := protocol.Envelope{Type: "display", Payload: protocol.MustMarshal(payload)}
 	_ = a.conn.WriteJSON(msg)
 }
 
-// envelope represents a WebSocket message envelope.
-type envelope struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-// mustMarshal is a helper that panics on marshal error (for static data).
-func mustMarshal(v any) json.RawMessage {
-	data, err := json.Marshal(v)
+// Run connects to the orchestrator and runs the event loop, blocking until
+// ctx is cancelled. The handler is called for each fire-and-forget invocation
+// (capabilities registered with AddCapabilityWithHandler are handled
+// automatically and do not reach the handler). Returns the assigned agent ID.
+func (a *Agent) Run(ctx context.Context, handler func(Invocation)) (string, error) {
+	id, invocations, closed, err := a.Connect()
 	if err != nil {
-		panic(err)
+		return "", err
 	}
-	return data
+
+	for {
+		select {
+		case <-ctx.Done():
+			a.Close()
+			return id, nil
+		case inv, ok := <-invocations:
+			if !ok {
+				return id, nil
+			}
+			handler(inv)
+		case _, ok := <-closed:
+			if !ok {
+				return id, nil
+			}
+		}
+	}
 }

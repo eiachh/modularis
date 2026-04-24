@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -14,7 +15,7 @@ import (
 func main() {
 	name := flag.String("name", "", "display name (required)")
 	displayType := flag.String("type", "terminal", "display type (terminal, web, led, discord, ...)")
-	server := flag.String("server", "http://localhost:8080", "orchestrator base URL")
+	server := flag.String("server", "", "orchestrator base URL (falls back to ORCHESTRATOR_URL env or default)")
 	flag.Parse()
 
 	if *name == "" {
@@ -25,36 +26,18 @@ func main() {
 
 	d := display.New(*server, *name, *displayType, 30*time.Second)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	fmt.Printf("Connecting display %q to orchestrator...\n", *name)
-	id, messages, closed, err := d.Connect()
+	id, err := d.Run(ctx, func(msg display.Message) {
+		render(msg)
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to connect display: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Display connected and registered! (ID: %s)\n", id)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	for {
-		select {
-		case msg, ok := <-messages:
-			if !ok {
-				fmt.Println("\n[DISPLAY] Message channel closed.")
-				return
-			}
-			render(msg)
-		case _, ok := <-closed:
-			if !ok {
-				return
-			}
-			fmt.Println("\n[DISPLAY] Connection to orchestrator lost! Waiting for reconnection...")
-		case <-sigCh:
-			fmt.Println("\nShutting down...")
-			d.Close()
-			return
-		}
-	}
+	fmt.Printf("Display %s stopped.\n", id)
 }
 
 // render prints a display message to the terminal.
